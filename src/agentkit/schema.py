@@ -92,6 +92,22 @@ def function_to_input_schema(func: Callable[..., Any]) -> dict[str, Any]:
     }
 
 
+def build_tool_definition(
+    name: str,
+    description: str,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Wrap name, description, and JSON-Schema parameters into an OpenAI tool definition."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        },
+    }
+
+
 def function_to_tool_definition(func: Callable[..., Any]) -> dict[str, Any]:
     """Build an OpenAI-format tool definition from a Python function.
 
@@ -103,11 +119,4 @@ def function_to_tool_definition(func: Callable[..., Any]) -> dict[str, Any]:
     if func.__doc__:
         description = inspect.cleandoc(func.__doc__).split("\n\n")[0].strip()
 
-    return {
-        "type": "function",
-        "function": {
-            "name": func.__name__,
-            "description": description,
-            "parameters": function_to_input_schema(func),
-        },
-    }
+    return build_tool_definition(func.__name__, description, function_to_input_schema(func))

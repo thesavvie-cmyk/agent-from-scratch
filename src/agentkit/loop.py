@@ -1,41 +1,70 @@
-"""Simple ReAct-style agent loop — block 4.
+"""Simple ReAct-style agent loop — block 4, extended with MCP in block 5.
 
-No abstractions yet; those arrive in block 7 (LlmClient / Agent).
+Design decision: the core implementation is async (async_simple_agent_loop)
+because MCP tool calls are inherently async. simple_agent_loop is kept as a
+synchronous wrapper via asyncio.run() for backward compatibility in scripts
+and unit tests. Callers in async contexts (e.g. when McpToolset is already
+open) should await async_simple_agent_loop directly to avoid nested-event-loop
+errors.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import litellm
 
 from agentkit.config import FAST_MODEL
 from agentkit.schema import function_to_tool_definition
 
+if TYPE_CHECKING:
+    from agentkit.mcp_client import McpToolset
+
 logger = logging.getLogger(__name__)
 
 
-def simple_agent_loop(
+async def async_simple_agent_loop(
     system_prompt: str,
     question: str,
     tools: list[Callable[..., Any]],
     *,
     model: str = FAST_MODEL,
     max_rounds: int = 10,
+    mcp_toolsets: list[McpToolset] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Run a simple think→act→observe cycle.
+    """Async ReAct-style think-act-observe loop.
 
-    Builds OpenAI tool definitions from *tools*, sends the conversation to
-    the model, executes any tool calls (errors become strings in context),
-    and repeats until the model returns a plain-text answer or max_rounds
-    is exhausted.
+    Combines local Python callables with optional MCP toolsets.
+    On tool name collision, the local callable wins and a warning is logged.
 
     Returns (final_answer, full message history).
+    Raises RuntimeError if max_rounds is exhausted.
     """
     tool_definitions = [function_to_tool_definition(t) for t in tools]
     toolbox: dict[str, Callable[..., Any]] = {t.__name__: t for t in tools}
+
+    mcp_lookup: dict[str, Any] = {}
+    if mcp_toolsets:
+        for ts in mcp_toolsets:
+            for defn in ts.tool_definitions():
+                name = defn["function"]["name"]
+                if name in toolbox:
+                    logger.warning(
+                        "Tool name collision: '%s' exists in local toolbox and MCP toolset"
+                        " — local tool wins.",
+                        name,
+                    )
+                elif name in mcp_lookup:
+                    logger.warning(
+                        "Tool name collision across MCP toolsets: '%s' — first toolset wins.",
+                        name,
+                    )
+                else:
+                    mcp_lookup[name] = ts
+                    tool_definitions.append(defn)
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -76,20 +105,21 @@ def simple_agent_loop(
             name = tc.function.name
             try:
                 args: dict[str, Any] = json.loads(tc.function.arguments)
-                func = toolbox.get(name)
-                if func is None:
+                if name in toolbox:
+                    raw = toolbox[name](**args)
+                    result_str = str(raw)
+                elif name in mcp_lookup:
+                    result_str = await mcp_lookup[name].call(name, args)
+                else:
                     result_str = f"Error: unknown tool '{name}'"
                     logger.info("Round %d | tool=%s — unknown", round_num + 1, name)
-                else:
-                    raw = func(**args)
-                    result_str = str(raw)
-                    logger.info(
-                        "Round %d | tool=%s args=%s result_len=%d",
-                        round_num + 1,
-                        name,
-                        args,
-                        len(result_str),
-                    )
+                logger.info(
+                    "Round %d | tool=%s args=%s result_len=%d",
+                    round_num + 1,
+                    name,
+                    args,
+                    len(result_str),
+                )
             except json.JSONDecodeError as exc:
                 result_str = f"Error: invalid JSON in arguments — {exc}"
                 logger.info("Round %d | tool=%s — JSON error: %s", round_num + 1, name, exc)
@@ -107,4 +137,31 @@ def simple_agent_loop(
 
     raise RuntimeError(
         f"Agent loop did not produce a final answer after {max_rounds} rounds."
+    )
+
+
+def simple_agent_loop(
+    system_prompt: str,
+    question: str,
+    tools: list[Callable[..., Any]],
+    *,
+    model: str = FAST_MODEL,
+    max_rounds: int = 10,
+    mcp_toolsets: list[McpToolset] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Synchronous wrapper around async_simple_agent_loop.
+
+    Creates a fresh event loop via asyncio.run(). Cannot be called from
+    within a running event loop — use async_simple_agent_loop directly
+    in async contexts (e.g. when McpToolset is already open).
+    """
+    return asyncio.run(
+        async_simple_agent_loop(
+            system_prompt,
+            question,
+            tools,
+            model=model,
+            max_rounds=max_rounds,
+            mcp_toolsets=mcp_toolsets,
+        )
     )
