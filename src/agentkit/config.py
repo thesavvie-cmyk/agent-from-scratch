@@ -6,6 +6,9 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
+FAST_MODEL: str = os.getenv("FAST_MODEL", "anthropic/claude-haiku-4-5")
+SMART_MODEL: str = os.getenv("SMART_MODEL", "anthropic/claude-sonnet-5")
+
 TRACKED_KEYS: list[str] = [
     "ANTHROPIC_API_KEY",
     "TAVILY_API_KEY",
