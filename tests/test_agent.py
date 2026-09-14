@@ -154,14 +154,31 @@ async def test_run_max_steps_terminates():
 # ── error_message ──────────────────────────────────────────────────────────────
 
 
-async def test_run_llm_error_returns_error_string():
-    """LlmResponse with error_message → AgentResult.output starts with [llm_error]."""
+async def test_run_llm_error_sets_error_field():
+    """LlmResponse with error_message → AgentResult.error is set, output is empty."""
     agent = Agent(model=_mock_model(_error_response("connection failed")), max_steps=5)
     result = await agent.run("hi")
 
-    assert isinstance(result.output, str)
-    assert result.output.startswith("[llm_error]")
-    assert "connection failed" in result.output
+    assert result.error is not None
+    assert "connection failed" in result.error
+    assert result.output == ""
+
+
+async def test_run_config_error_propagates_as_exception():
+    """Configuration errors (bad key, unknown model) must not be swallowed."""
+    import litellm
+
+    mock_model = MagicMock(spec=LlmClient)
+    mock_model.generate = AsyncMock(
+        side_effect=litellm.AuthenticationError(
+            message="Invalid API key",
+            llm_provider="anthropic",
+            model="claude-haiku",
+        )
+    )
+    agent = Agent(model=mock_model, max_steps=5)
+    with pytest.raises(litellm.AuthenticationError):
+        await agent.run("hi")
 
 
 # ── structured output ─────────────────────────────────────────────────────────

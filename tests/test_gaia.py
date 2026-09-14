@@ -7,7 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 import agentkit.gaia as gaia_mod
-from agentkit.gaia import GaiaOutput, evaluate_single, is_correct, solve_problem
+from agentkit.gaia import (
+    GaiaOutput,
+    evaluate_single,
+    is_correct,
+    load_file_tasks,
+    load_search_tasks,
+    solve_problem,
+)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -104,6 +111,29 @@ def test_load_level1_returns_problems() -> None:
     assert "Question" in first
     assert "Final answer" in first
     assert "task_id" in first
+
+
+@pytest.mark.live
+def test_load_search_tasks_no_files_no_video() -> None:
+    tasks = load_search_tasks()
+    assert len(tasks) > 0
+    for t in tasks:
+        assert not t.get("file_name"), f"task {t['task_id']} has file_name"
+        tools_str = ""
+        meta = t.get("Annotator Metadata", {})
+        if isinstance(meta, dict):
+            tools_str = meta.get("Tools", "").lower()
+        blocked = ("video", "pdf", "image", "audio", "excel", "word")
+        for kw in blocked:
+            assert kw not in tools_str, f"task {t['task_id']} has blocked tool: {kw}"
+
+
+@pytest.mark.live
+def test_load_file_tasks_all_have_filename() -> None:
+    tasks = load_file_tasks()
+    assert len(tasks) > 0
+    for t in tasks:
+        assert t.get("file_name"), f"task {t['task_id']} missing file_name"
 
 
 @pytest.mark.live

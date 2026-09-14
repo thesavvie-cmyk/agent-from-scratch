@@ -16,12 +16,22 @@ from agentkit.types import Event, Message, ToolCall, ToolResult
 logger = logging.getLogger(__name__)
 
 
+class _LlmTransientError(RuntimeError):
+    """Raised by _step when LlmClient returns error_message (transient fault).
+
+    Config errors (bad API key, unknown model) are NOT wrapped here — they
+    propagate as the original litellm exceptions so the caller can distinguish
+    them from transient failures.
+    """
+
+
 @dataclass
 class AgentResult:
     """Output from a single agent invocation."""
 
     output: str | BaseModel
     context: ExecutionContext
+    error: str | None = None
 
 
 class Agent:
@@ -37,10 +47,11 @@ class Agent:
     --------------------------------------------
     LiteLLM already retries internally on transient errors (num_retries).
     Re-trying at the agent level would double the wait and still fail on
-    persistent errors.  Instead, when error_message is set, _step() returns
-    the error string immediately as the terminal answer.  This prevents the
-    loop from spinning silently and lets callers (e.g. the GAIA runner)
-    detect and record the failure via the output prefix ``[llm_error]``.
+    persistent errors.  When error_message is set, _step() raises
+    _LlmTransientError; run() catches it and returns AgentResult(error=...).
+    Configuration errors (bad key, unknown model) propagate as the original
+    litellm exceptions — they bypass the _LlmTransientError catch so the
+    caller can distinguish them from transient network faults.
     """
 
     def __init__(
@@ -96,8 +107,16 @@ class Agent:
         ctx.add_message("user", user_input, author=self.name)
 
         final_result: str | BaseModel | None = None
-        while final_result is None and ctx.current_step < self.max_steps:
-            final_result = await self._step(ctx)
+        run_error: str | None = None
+        try:
+            while final_result is None and ctx.current_step < self.max_steps:
+                final_result = await self._step(ctx)
+        except _LlmTransientError as exc:
+            run_error = str(exc)
+
+        if run_error is not None:
+            ctx.final_result = ""
+            return AgentResult(output="", error=run_error, context=ctx)
 
         output: str | BaseModel = (
             final_result
@@ -123,9 +142,11 @@ class Agent:
 
         if response.error_message:
             logger.warning(
-                "LLM error at step %d: %s", context.current_step, response.error_message
+                "LLM transient error at step %d: %s",
+                context.current_step,
+                response.error_message,
             )
-            return f"[llm_error] {response.error_message}"
+            raise _LlmTransientError(response.error_message)
 
         # Record think event (may contain Message + ToolCall items)
         think_event = Event(

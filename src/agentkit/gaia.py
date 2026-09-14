@@ -75,6 +75,57 @@ async def _raw_solve(
 
 # ── public API ────────────────────────────────────────────────────────────────
 
+_WEB_KW = ("search", "browser", "web")
+_BLOCK_KW = (
+    "video", "pdf", "image", "audio", "excel", "word",
+    "spreadsheet", "powerpoint", "docx", "mp3", "mp4", "youtube",
+)
+
+
+def _get_tools_str(problem: dict[str, Any]) -> str:
+    """Extract the Tools string from Annotator Metadata."""
+    import json as _json
+
+    meta = problem.get("Annotator Metadata", {})
+    if isinstance(meta, str):
+        try:
+            meta = _json.loads(meta)
+        except (ValueError, TypeError):
+            return ""
+    return meta.get("Tools", "") if isinstance(meta, dict) else ""
+
+
+def load_search_tasks(limit: int | None = None) -> list[dict[str, Any]]:
+    """Level-1 tasks that require web search only (no file attachment, no
+    video/PDF/image parsing).
+
+    These are the tasks where a web-search agent can plausibly outperform a
+    tool-less baseline, and they are the target evaluation set for chapter 8.
+    """
+    problems = load_level1()
+    result = [
+        p
+        for p in problems
+        if (
+            any(kw in _get_tools_str(p).lower() for kw in _WEB_KW)
+            and not p.get("file_name")
+            and not any(kw in _get_tools_str(p).lower() for kw in _BLOCK_KW)
+        )
+    ]
+    if limit is not None:
+        result = result[:limit]
+    return result
+
+
+def load_file_tasks(limit: int | None = None) -> list[dict[str, Any]]:
+    """Level-1 tasks that have a file attachment (target set for chapter 5+)."""
+    problems = load_level1()
+    result = [p for p in problems if p.get("file_name")]
+    if limit is not None:
+        result = result[:limit]
+    return result
+
+
 def load_level1(limit: int | None = None) -> list[dict[str, Any]]:
     """Load GAIA level-1 validation split. Caches locally via datasets library.
 
