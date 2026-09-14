@@ -9,7 +9,6 @@ from pydantic import BaseModel
 
 from agentkit.basics import Conversation, StructuredOutputError, ask_many, extract
 
-
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _resp(content: str) -> MagicMock:

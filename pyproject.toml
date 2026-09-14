@@ -9,6 +9,9 @@ dependencies = [
     "anthropic",
     "litellm",
     "pydantic",
+    "datasets",
+    "tqdm",
+    "pandas",
 ]
 
 [dependency-groups]
