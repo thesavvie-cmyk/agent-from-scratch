@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from agentkit.context import ExecutionContext
-from agentkit.schema import build_tool_definition, function_to_tool_definition
+from agentkit.schema import build_tool_definition, function_to_input_schema
 
 
 class BaseTool(ABC):
@@ -81,35 +81,17 @@ class FunctionTool(BaseTool):
         # Extract description from docstring if not explicitly given
         if description is not None:
             _description = description
+        elif func.__doc__:
+            _description = inspect.cleandoc(func.__doc__).split("\n\n")[0].strip()
         else:
-            raw = function_to_tool_definition(func)
-            _description = raw["function"]["description"]
+            _description = ""
 
         super().__init__(name=_name, description=_description)
 
     def _generate_definition(self) -> dict[str, Any]:
-        defn = function_to_tool_definition(self._func)
-        # Override with potentially customised name / description
-        defn["function"]["name"] = self.name
-        defn["function"]["description"] = self.description
-        # Remove 'context' from schema — it is injected internally
-        if self._needs_context:
-            props = {
-                k: v
-                for k, v in defn["function"]["parameters"].get("properties", {}).items()
-                if k != "context"
-            }
-            required = [
-                r
-                for r in defn["function"]["parameters"].get("required", [])
-                if r != "context"
-            ]
-            defn["function"]["parameters"] = {
-                "type": "object",
-                "properties": props,
-                "required": required,
-            }
-        return defn
+        exclude = {"context"} if self._needs_context else None
+        params = function_to_input_schema(self._func, exclude=exclude)
+        return build_tool_definition(self.name, self.description, params)
 
     async def execute(self, context: ExecutionContext, **kwargs: Any) -> Any:
         if self._needs_context:

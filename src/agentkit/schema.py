@@ -5,7 +5,7 @@ import inspect
 import logging
 import types as _stdlib_types
 from collections.abc import Callable
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,12 @@ _TYPE_MAP: dict[Any, str] = {
 }
 
 
-def _annotation_to_json_type(
+def _annotation_to_json_schema(
     annotation: Any,
     func_name: str,
     param_name: str,
-) -> str:
-    """Convert a Python type annotation to a JSON Schema type string."""
+) -> dict[str, Any]:
+    """Convert a Python type annotation to a JSON Schema fragment (dict)."""
     if annotation is inspect.Parameter.empty:
         logger.warning(
             "function_to_tool_definition: %s.%s has no type annotation; "
@@ -33,23 +33,34 @@ def _annotation_to_json_type(
             func_name,
             param_name,
         )
-        return "string"
+        return {"type": "string"}
 
     # X | Y  (Python 3.10+ union syntax → types.UnionType)
     if isinstance(annotation, _stdlib_types.UnionType):
         non_none = [a for a in annotation.__args__ if a is not type(None)]
         if non_none:
-            return _annotation_to_json_type(non_none[0], func_name, param_name)
+            return _annotation_to_json_schema(non_none[0], func_name, param_name)
 
     # typing.Union[X, Y] / Optional[X]
     if get_origin(annotation) is Union:
         non_none = [a for a in get_args(annotation) if a is not type(None)]
         if non_none:
-            return _annotation_to_json_type(non_none[0], func_name, param_name)
+            return _annotation_to_json_schema(non_none[0], func_name, param_name)
+
+    # Literal["a", "b", ...] → {"type": ..., "enum": [...]}
+    if get_origin(annotation) is Literal:
+        args = get_args(annotation)
+        first_type = type(args[0]) if args else str
+        json_type = _TYPE_MAP.get(first_type, "string")
+        return {"type": json_type, "enum": list(args)}
+
+    # Pydantic BaseModel subclass → inline its JSON schema
+    if isinstance(annotation, type) and hasattr(annotation, "model_json_schema"):
+        return annotation.model_json_schema()
 
     mapped = _TYPE_MAP.get(annotation)
     if mapped is not None:
-        return mapped
+        return {"type": mapped}
 
     logger.warning(
         "function_to_tool_definition: %s.%s has unsupported annotation %r; "
@@ -58,17 +69,23 @@ def _annotation_to_json_type(
         param_name,
         annotation,
     )
-    return "string"
+    return {"type": "string"}
 
 
-def function_to_input_schema(func: Callable[..., Any]) -> dict[str, Any]:
+def function_to_input_schema(
+    func: Callable[..., Any],
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
     """Build a JSON Schema 'parameters' object from a function's signature.
 
     Uses type annotations for property types. Parameters without defaults
     are added to 'required'. Parameters without annotations log a warning.
+    Pass ``exclude`` to skip specific parameter names (e.g. injected context).
     """
     sig = inspect.signature(func)
     func_name = func.__name__
+    _exclude = exclude or set()
 
     try:
         hints = get_type_hints(func)
@@ -79,9 +96,10 @@ def function_to_input_schema(func: Callable[..., Any]) -> dict[str, Any]:
     required: list[str] = []
 
     for name, param in sig.parameters.items():
+        if name in _exclude:
+            continue
         annotation = hints.get(name, param.annotation)
-        json_type = _annotation_to_json_type(annotation, func_name, name)
-        properties[name] = {"type": json_type}
+        properties[name] = _annotation_to_json_schema(annotation, func_name, name)
         if param.default is inspect.Parameter.empty:
             required.append(name)
 

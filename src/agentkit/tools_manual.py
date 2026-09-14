@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import litellm
 
@@ -49,7 +49,7 @@ CALCULATOR_TOOL_DEFINITION: dict[str, Any] = {
 # ── Calculator implementation ─────────────────────────────────────────────────
 
 def calculator(
-    operator: str,
+    operator: Literal["add", "subtract", "multiply", "divide"],
     first_number: float,
     second_number: float,
 ) -> float:
