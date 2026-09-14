@@ -10,6 +10,10 @@ Sections:
 from __future__ import annotations
 
 import json
+import sys
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 from agentkit.config import SMART_MODEL
 from agentkit.loop import simple_agent_loop
@@ -55,9 +59,9 @@ print(json.dumps(CALCULATOR_TOOL_DEFINITION, indent=2))
 print("\n[What the generated schema lacks vs handwritten:]")
 print("  - No per-parameter descriptions — model only sees 'type: string'")
 print("  - No enum for 'topic' — model may hallucinate invalid values")
-print("  - str | None → 'string' — the None option is invisible to the model")
+print("  - str | None -> 'string' -- the None option is invisible to the model")
 print("  - time_range valid values ('day'/'week'/'month'/'year') not documented")
-print("  → Handwritten schemas are more expensive to maintain but safer for structured params")
+print("  -> Handwritten schemas are more expensive to maintain but safer for structured params")
 
 
 # ── C. Nobel 2025 ─────────────────────────────────────────────────────────────
@@ -95,10 +99,10 @@ for m in history_d:
     if m["role"] == "assistant" and m.get("tool_calls"):
         for tc in m["tool_calls"]:
             args_preview = tc["function"]["arguments"][:70].replace("\n", " ")
-            print(f"  → {tc['function']['name']}({args_preview})")
+            print(f"  -> {tc['function']['name']}({args_preview})")
     elif m["role"] == "tool":
         preview = m["content"][:100].replace("\n", " ")
-        print(f"  ← {preview!r}")
+        print(f"  <- {preview!r}")
 
 
 # ── E. Negative rule — Pythagorean theorem ────────────────────────────────────
