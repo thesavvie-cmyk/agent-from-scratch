@@ -4,79 +4,87 @@ to_messages() is the boundary between the agent's internal trace and the
 LiteLLM request. In chapter 6 we will insert context compression here —
 trimming old tool results or summarising long conversations before the
 messages list is sent to the model.
+
+items_to_messages() is the shared conversion core used by both to_messages()
+(block 6) and LlmClient._build_messages() (block 7). The split avoids
+duplicating the grouping logic.
 """
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from agentkit.context import ExecutionContext
-from agentkit.types import Message, ToolCall, ToolResult
+from agentkit.types import ContentItem, Message, ToolCall, ToolResult
+
+
+def items_to_messages(items: Iterable[ContentItem]) -> list[dict[str, Any]]:
+    """Convert a flat sequence of ContentItems to LiteLLM-compatible messages.
+
+    Conversion rules
+    ----------------
+    * Message        → {"role": ..., "content": ...}
+    * ToolCall(s)    → Consecutive ToolCall items are collected into ONE
+                       assistant message with a "tool_calls" list.
+    * ToolResult     → {"role": "tool", "tool_call_id": ..., "content": ...}
+                       Each result becomes its own tool message.
+    """
+    messages: list[dict[str, Any]] = []
+    pending_calls: list[ToolCall] = []
+
+    for item in items:
+        if isinstance(item, ToolCall):
+            pending_calls.append(item)
+        else:
+            if pending_calls:
+                messages.append(_calls_to_assistant(pending_calls))
+                pending_calls = []
+            if isinstance(item, Message):
+                messages.append({"role": item.role, "content": item.content})
+            elif isinstance(item, ToolResult):
+                content_str = (
+                    "\n".join(str(c) for c in item.content) if item.content else ""
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": item.tool_call_id,
+                        "content": content_str,
+                    }
+                )
+
+    if pending_calls:
+        messages.append(_calls_to_assistant(pending_calls))
+
+    return messages
+
+
+def _calls_to_assistant(calls: list[ToolCall]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": tc.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments),
+                },
+            }
+            for tc in calls
+        ],
+    }
 
 
 def to_messages(ctx: ExecutionContext) -> list[dict[str, Any]]:
     """Convert an ExecutionContext into a LiteLLM-compatible messages list.
 
-    Conversion rules
-    ----------------
-    * Message          → {"role": ..., "content": ...}
-    * ToolCall(s)      → ONE assistant message with a "tool_calls" list.
-                         All ToolCall items in a single Event are grouped
-                         into the same assistant message to preserve the
-                         "they were requested together" semantics.
-    * ToolResult       → {"role": "tool", "tool_call_id": ..., "content": ...}
-                         Each result becomes its own tool message.
+    Delegates to items_to_messages(ctx.iter_content()). Chapter 6 will
+    insert compression/summarisation here before the items are converted.
     """
-    messages: list[dict[str, Any]] = []
-
-    for event in ctx.events:
-        plain: list[Message] = []
-        calls: list[ToolCall] = []
-        results: list[ToolResult] = []
-
-        for item in event.content:
-            if isinstance(item, Message):
-                plain.append(item)
-            elif isinstance(item, ToolCall):
-                calls.append(item)
-            elif isinstance(item, ToolResult):
-                results.append(item)
-
-        for msg in plain:
-            messages.append({"role": msg.role, "content": msg.content})
-
-        if calls:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": tc.tool_call_id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
-                            },
-                        }
-                        for tc in calls
-                    ],
-                }
-            )
-
-        for result in results:
-            content_str = (
-                "\n".join(str(c) for c in result.content) if result.content else ""
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": result.tool_call_id,
-                    "content": content_str,
-                }
-            )
-
-    return messages
+    return items_to_messages(ctx.iter_content())
 
 
 def render(ctx: ExecutionContext) -> str:
