@@ -245,6 +245,26 @@ async def test_drop_oldest_fits_within_budget() -> None:
     assert estimate_context_tokens(result) <= max_tok * 2  # allow some overshoot
 
 
+@pytest.mark.asyncio
+async def test_drop_oldest_never_returns_empty_for_messages() -> None:
+    """DropOldest must not return [] when content is only Messages.
+
+    Bug: _safe_cut_points adds len(contents) as a valid cut point.
+    contents[len(contents):] == [] and estimate_context_tokens([]) == 1,
+    which satisfies any max_tokens threshold, resulting in an empty list.
+    That causes the Anthropic API error 'no non-system message'.
+    """
+    msgs: list[Any] = [
+        Message(role="user", content=f"turn {i}") for i in range(10)
+    ]
+    ctx = _ctx()
+    # max_tokens=1 is impossibly small — without the fix this returns []
+    strategy = DropOldest(max_tokens=1)
+    result = await strategy.apply(msgs, ctx)
+
+    assert len(result) > 0, "DropOldest must never return an empty list"
+
+
 # ── SummarizeHistory ─────────────────────────────────────────────────────────
 
 

@@ -170,16 +170,19 @@ class DropOldest:
         from agentkit.memory.budget import estimate_context_tokens
 
         safe_points = _safe_cut_points(contents)
-        # Try progressively larger cuts until we fit
+        # Try progressively larger cuts until we fit.
+        # Never cut to position >= len(contents): contents[len:] == [] would send
+        # an empty message list to the API and raise "no non-system message" errors.
         for cut in reversed(safe_points):
-            if cut == 0:
+            if cut == 0 or cut >= len(contents):
                 continue
             candidate = contents[cut:]
             if estimate_context_tokens(candidate) <= self.max_tokens:
                 return candidate
-        # No single cut is sufficient — return at least the smallest safe slice
-        if len(safe_points) > 1:
-            return contents[safe_points[-1] :]
+        # No cut is small enough — keep as much as possible without returning empty
+        non_empty = [sp for sp in safe_points if 0 < sp < len(contents)]
+        if non_empty:
+            return contents[non_empty[-1] :]
         return list(contents)
 
 

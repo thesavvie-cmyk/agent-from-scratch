@@ -102,28 +102,36 @@ async def section_b() -> None:
     session = store1.create(user_id="bob")
     sid = session.session_id
 
-    print(f"\n  [process 1] session_id = {sid}")
+    print(f"\n  [process 1] store1 id={id(store1)}")
+    print(f"  [process 1] session_id = {sid}")
     result = await agent1.run(
         "My secret number is 42. Remember it.", session=session
     )
+    # Reload to confirm events were flushed to disk
+    session = store1.get(sid) or session
     print(f"  [process 1] Agent: {result.output}")
+    print(f"  [process 1] Events in DB after turn: {len(session.events)}")
 
-    # Simulate process restart: new store + agent, reload by session_id
-    print("\n  [restart] Simulating process restart…")
+    # Simulate process restart: completely new Python objects, no shared state.
+    # The ONLY way store2 can find the session is by reading the SQLite file.
+    del store1, agent1, session
+    print("\n  [restart] del store1 / agent1 / session — all process-1 objects gone")
+
     store2 = SqliteSessionStore(str(SESSION_DB))
     agent2 = _make_agent(store2)
+    print(f"  [process 2] store2 id={id(store2)}  (different object)")
     session2 = store2.get(sid)
 
     if session2 is None:
         print("  [FAIL] session not found after restart")
         return
 
-    print(f"  [process 2] Loaded session with {len(session2.events)} past events")
+    print(f"  [process 2] Loaded session with {len(session2.events)} past events from disk")
     result2 = await agent2.run("What was my secret number?", session=session2)
     print(f"  [process 2] Agent: {result2.output}")
 
     ok = "42" in str(result2.output)
-    print(f"\n  Result: {'PASS — agent recalled the number' if ok else 'FAIL — number not recalled'}")
+    print(f"\n  Result: {'PASS — agent recalled the number from disk' if ok else 'FAIL — number not recalled'}")
 
 
 # ── Section C — state persistence with tools ──────────────────────────────────
@@ -179,7 +187,7 @@ async def section_d() -> None:
     _hr("Section D — Context growth across 10 turns (with vs without compaction)")
 
     from agentkit.memory.budget import ContextBudget
-    from agentkit.memory.compaction import TruncateOldToolResults
+    from agentkit.memory.compaction import DropOldest, TruncateOldToolResults
 
     questions = [
         "What is 1 + 1?",
@@ -196,8 +204,9 @@ async def section_d() -> None:
 
     async def _run_config(
         name: str, budget: ContextBudget | None
-    ) -> tuple[str, list[int]]:
+    ) -> tuple[str, list[int], list[int]]:
         from agentkit.memory.budget import estimate_context_tokens
+        from agentkit.types import ContentItem
 
         store = InMemorySessionStore()
         agent = Agent(
@@ -210,44 +219,61 @@ async def section_d() -> None:
         )
         session = store.create(user_id="dave")
         token_snapshots: list[int] = []
+        event_snapshots: list[int] = []
 
         for q in questions:
-            result = await agent.run(q, session=session)
+            await agent.run(q, session=session)
             session = store.get(session.session_id) or session
-            # Estimate current session context size
-            from agentkit.types import ContentItem
 
             all_contents: list[ContentItem] = []
             for evt in session.events:
                 all_contents.extend(evt.content)  # type: ignore[arg-type]
             token_snapshots.append(estimate_context_tokens(all_contents))
+            event_snapshots.append(len(session.events))
 
-        return name, token_snapshots
+        return name, token_snapshots, event_snapshots
 
+    # Strategy selection depends on what fills the context:
+    #   - tool-heavy sessions: TruncateOldToolResults (keeps last N search results)
+    #   - text-only sessions:  DropOldest (drops oldest messages until under budget)
+    #
+    # Sessions need *lower* thresholds than single-run contexts because history
+    # accumulates permanently — it never resets between agent.run calls.
+    # At ~43 tok/turn (text-only), max_tokens=200 fires around turn 5.
+    # A real session with search results (~500-2000 tok each) would fill 200 tokens
+    # after the very first tool call.
     budget = ContextBudget(
-        max_tokens=4_000,
-        strategies=[TruncateOldToolResults(keep_recent=2)],
+        max_tokens=200,
+        strategies=[DropOldest(max_tokens=200)],
     )
 
     print()
-    configs = [
+    configs: list[tuple[str, ContextBudget | None]] = [
         ("no_budget", None),
         ("with_budget", budget),
     ]
-    results: list[tuple[str, list[int]]] = []
+    results: list[tuple[str, list[int], list[int]]] = []
     for name, b in configs:
-        _, snapshots = await _run_config(name, b)
-        results.append((name, snapshots))
-        print(f"  {name}: token snapshots = {snapshots}")
+        _, tok_snaps, evt_snaps = await _run_config(name, b)
+        results.append((name, tok_snaps, evt_snaps))
 
-    print(f"\n  {'Turn':>5} {'no_budget':>12} {'with_budget':>12}")
-    print(f"  {'─' * 5} {'─' * 12} {'─' * 12}")
-    nb = results[0][1]
-    wb = results[1][1]
-    for i, (a, b_val) in enumerate(zip(nb, wb), 1):
-        print(f"  {i:>5} {a:>12,} {b_val:>12,}")
-    print(f"\n  Final: no_budget={nb[-1]:,}  with_budget={wb[-1]:,}  "
-          f"saved={nb[-1]-wb[-1]:,} ({100*(nb[-1]-wb[-1])//max(nb[-1],1)}%)")
+    nb_tok, wb_tok = results[0][1], results[1][1]
+    nb_evt = results[0][2]
+
+    print(f"\n  {'Turn':>5}  {'Question (abbrev)':<32}  {'Events':>7}  {'no_budget':>10}  {'with_budget':>10}  {'saved%':>6}")
+    print(f"  {'─'*5}  {'─'*32}  {'─'*7}  {'─'*10}  {'─'*10}  {'─'*6}")
+    for i, (q, a, b_val, e) in enumerate(
+        zip(questions, nb_tok, wb_tok, nb_evt), 1
+    ):
+        pct = int(100 * (a - b_val) / a) if a else 0
+        print(f"  {i:>5}  {q[:32]:<32}  {e:>7}  {a:>10,}  {b_val:>10,}  {pct:>5}%")
+
+    final_nb, final_wb = nb_tok[-1], wb_tok[-1]
+    saved = final_nb - final_wb
+    print(f"\n  Final: no_budget={final_nb:,}  with_budget={final_wb:,}  "
+          f"saved={saved:,} ({100*saved//max(final_nb,1)}%)")
+    print(f"  Note: session history grows ~{final_nb // len(questions):,} tok/turn on average "
+          f"(vs single-run context which resets each agent.run call)")
 
 
 # ── Section E — user isolation ─────────────────────────────────────────────────
@@ -259,19 +285,25 @@ async def section_e() -> None:
     store = InMemorySessionStore()
     agent = _make_agent(store)
 
-    # Alice's session
+    # Alice's session — plant her secret
     session_alice = store.create(user_id="alice")
     await agent.run("My secret code is ALPHA-1.", session=session_alice)
+    # Must reload: append_events has flushed new events; reload so next turn sees them
     session_alice = store.get(session_alice.session_id) or session_alice
 
-    # Bob's session
+    # Bob's session — plant his secret
     session_bob = store.create(user_id="bob")
     await agent.run("My secret code is BETA-2.", session=session_bob)
     session_bob = store.get(session_bob.session_id) or session_bob
 
-    # Alice asks — should NOT see Bob's code
+    print(f"\n  Alice events: {len(session_alice.events)}  Bob events: {len(session_bob.events)}")
+    print(f"  Alice session_id: {session_alice.session_id}")
+    print(f"  Bob   session_id: {session_bob.session_id}")
+    print(f"  IDs are different: {session_alice.session_id != session_bob.session_id}")
+
+    # Alice asks — must see ALPHA-1, must NOT see BETA-2
     result_alice = await agent.run("What is my secret code?", session=session_alice)
-    # Bob asks — should NOT see Alice's code
+    # Bob asks — must see BETA-2, must NOT see ALPHA-1
     result_bob = await agent.run("What is my secret code?", session=session_bob)
 
     alice_answer = str(result_alice.output)
