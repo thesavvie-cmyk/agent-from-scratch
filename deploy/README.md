@@ -107,7 +107,21 @@ All critical checks should show `[✓]`.
 
 ---
 
-## 5. Install systemd service
+## 5. Clone the repository on the server
+
+```bash
+su - agent
+git clone git@github.com:thesavvie-cmyk/agent-from-scratch.git ~/agent-from-scratch
+cd ~/agent-from-scratch
+uv sync --no-dev
+```
+
+> The server needs its own SSH key added to GitHub, OR you can use HTTPS with a deploy token.
+> For HTTPS: `git clone https://github.com/thesavvie-cmyk/agent-from-scratch.git`
+
+---
+
+## 7. Install systemd service
 
 Back as root:
 ```bash
@@ -119,7 +133,7 @@ systemctl status agentkit
 
 ---
 
-## 6. Deploy updates (from your local PC)
+## 8. Deploy updates (from your local PC)
 
 Set server details once:
 ```bash
@@ -139,7 +153,7 @@ The script:
 
 ---
 
-## 7. View logs
+## 9. View logs
 
 ```bash
 # Follow live logs
@@ -154,7 +168,7 @@ journalctl -u agentkit -b
 
 ---
 
-## 8. Run the benchmark (compare PC vs server)
+## 10. Run the benchmark (compare PC vs server)
 
 On your PC:
 ```bash
