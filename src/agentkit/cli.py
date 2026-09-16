@@ -3,9 +3,14 @@
 Usage:
     uv run agent ask "what is 2+2?"
     uv run agent chat
+    uv run agent chat --session <id>        # resume a persistent session
     uv run agent serve          # long-running daemon mode (used by systemd)
     uv run agent doctor [--json]
     uv run agent budget [--json]
+    uv run agent sessions                   # list sessions for default user
+    uv run agent sessions --show <id>       # show session details
+    uv run agent sessions --delete <id>     # delete one session
+    uv run agent sessions --delete-user <u> # delete all sessions for user
 
 Common flags (ask / chat):
     --model MODEL       Model ID (default: FAST_MODEL)
@@ -107,13 +112,42 @@ async def cmd_ask(args: argparse.Namespace) -> int:
 
 async def cmd_chat(args: argparse.Namespace) -> None:
     model = args.model or FAST_MODEL
+    session_id: str | None = getattr(args, "session", None)
+
+    # Set up session store when --session is requested
+    session = None
+    store = None
+    if session_id is not None:
+        from agentkit.memory.session import SqliteSessionStore
+
+        store = SqliteSessionStore()
+        session = store.get(session_id)
+        if session is None:
+            # Create a new session with the requested ID is not possible; create fresh
+            session = store.create(user_id="cli")
+            print(
+                f"  [session] Created new session {session.session_id} "
+                f"('{session_id}' not found)"
+            )
+        else:
+            print(
+                f"  [session] Resumed session {session.session_id} "
+                f"({len(session.events)} past events)"
+            )
+
     print(f"Agent chat (model={model}, max_steps={args.max_steps}). Ctrl+C to quit.\n")
 
     async def _run_session(tools: list[Any]) -> None:
-        agent = _make_agent(model, tools, args.max_steps)
+        nonlocal session
+        if session is not None and store is not None:
+            agent = _make_agent(model, tools, args.max_steps)
+            agent._session_store = store  # attach store for persistence
+        else:
+            agent = _make_agent(model, tools, args.max_steps)
+
         from agentkit.context import ExecutionContext
 
-        ctx = ExecutionContext()
+        ctx: ExecutionContext | None = None
 
         while True:
             try:
@@ -126,20 +160,28 @@ async def cmd_chat(args: argparse.Namespace) -> None:
                 continue
 
             t0 = time.perf_counter()
-            result = await agent.run(user_input, context=ctx)
+            if session is not None:
+                result = await agent.run(user_input, session=session)
+                # Reload session so next turn sees persisted events
+                if store is not None:
+                    session = store.get(session.session_id) or session
+                ctx = result.context
+            else:
+                result = await agent.run(user_input, context=ctx)
+                ctx = result.context
+
             elapsed = time.perf_counter() - t0
-            # Re-use same ctx so history accumulates across turns
-            ctx = result.context
 
             if args.json_out:
-                usage = ctx.state.get("token_usage", {})
+                usage = (ctx or result.context).state.get("token_usage", {})
                 out: dict[str, Any] = {
                     "output": str(result.output),
-                    "steps": ctx.current_step,
+                    "steps": (ctx or result.context).current_step,
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "elapsed_s": round(elapsed, 2),
                     "error": result.error,
+                    "session_id": session.session_id if session else None,
                 }
                 print(json.dumps(out, ensure_ascii=False))
             else:
@@ -149,7 +191,7 @@ async def cmd_chat(args: argparse.Namespace) -> None:
                     print(f"Agent: {result.output}")
 
             if args.trace:
-                print(display_trace(ctx), file=sys.stderr)
+                print(display_trace(ctx or result.context), file=sys.stderr)
 
     if args.no_tools:
         await _run_session([])
@@ -157,6 +199,80 @@ async def cmd_chat(args: argparse.Namespace) -> None:
         async with McpToolset(*_mcp_cmd()) as ts:
             tools = load_mcp_tools(ts)
             await _run_session(tools)
+
+
+# ── sessions ──────────────────────────────────────────────────────────────────
+
+
+def cmd_sessions(args: argparse.Namespace) -> None:
+    """List, inspect, or delete sessions."""
+    from agentkit.memory.session import SqliteSessionStore
+
+    store = SqliteSessionStore()
+
+    if getattr(args, "delete", None):
+        ok = store.delete(args.delete)
+        if ok:
+            print(f"Deleted session {args.delete}")
+        else:
+            print(f"Session not found: {args.delete}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if getattr(args, "delete_user", None):
+        n = store.delete_user(args.delete_user)
+        print(f"Deleted {n} session(s) for user '{args.delete_user}'")
+        return
+
+    if getattr(args, "show", None):
+        session = store.get(args.show)
+        if session is None:
+            print(f"Session not found: {args.show}", file=sys.stderr)
+            sys.exit(1)
+        import datetime
+
+        print(f"\n  Session   : {session.session_id}")
+        print(f"  User      : {session.user_id}")
+        created = datetime.datetime.fromtimestamp(session.created_at).strftime("%Y-%m-%d %H:%M:%S")
+        updated = datetime.datetime.fromtimestamp(session.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"  Created   : {created}")
+        print(f"  Updated   : {updated}")
+        print(f"  Events    : {len(session.events)}")
+        print(f"  State keys: {list(session.state.keys())}")
+        if session.metadata:
+            print(f"  Metadata  : {session.metadata}")
+        if session.events:
+            print("\n  Event history:")
+            for evt in session.events:
+                for item in evt.content:
+                    from agentkit.types import Message, ToolCall, ToolResult
+
+                    if isinstance(item, Message):
+                        snippet = item.content[:80].replace("\n", " ")
+                        print(f"    [{item.role}] {snippet}")
+                    elif isinstance(item, ToolCall):
+                        print(f"    [tool_call] {item.name}({item.arguments})"[:80])
+                    elif isinstance(item, ToolResult):
+                        snippet = str(item.content)[:60].replace("\n", " ")
+                        print(f"    [tool_result] {item.name}: {snippet}")
+        print()
+        return
+
+    # Default: list sessions for 'default' user (or --user)
+    user_id = getattr(args, "user", "default")
+    sessions = store.list_sessions(user_id)
+    if not sessions:
+        print(f"No sessions found for user '{user_id}'")
+        return
+
+    import datetime
+
+    print(f"\n  {'Session ID':<38} {'Events':>7} {'Updated':<20}")
+    print(f"  {'─' * 38} {'─' * 7} {'─' * 20}")
+    for s in sessions:
+        updated = datetime.datetime.fromtimestamp(s.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"  {s.session_id:<38} {len(s.events):>7} {updated}")
+    print()
 
 
 # ── serve (daemon mode for systemd) ──────────────────────────────────────────
@@ -245,6 +361,21 @@ def _build_parser() -> argparse.ArgumentParser:
     # chat
     chat_p = sub.add_parser("chat", help="Interactive multi-turn chat")
     _add_run_flags(chat_p)
+    chat_p.add_argument(
+        "--session",
+        default=None,
+        metavar="ID",
+        help="Session ID to resume (creates new if not found)",
+    )
+
+    # sessions
+    sess_p = sub.add_parser("sessions", help="List, inspect, or delete sessions")
+    sess_p.add_argument("--user", default="default", help="User ID (default: 'default')")
+    sess_p.add_argument("--show", metavar="ID", help="Show full session history")
+    sess_p.add_argument("--delete", metavar="ID", help="Delete a session by ID")
+    sess_p.add_argument(
+        "--delete-user", metavar="USER", dest="delete_user", help="Delete all sessions for user"
+    )
 
     # serve
     sub.add_parser("serve", help="Long-running daemon mode (used by systemd)")
@@ -289,3 +420,5 @@ def main() -> None:
         sys.exit(asyncio.run(cmd_doctor(args)))
     elif args.command == "budget":
         cmd_budget(args)
+    elif args.command == "sessions":
+        cmd_sessions(args)

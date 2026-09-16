@@ -17,6 +17,7 @@ from agentkit.types import Event, Message, ToolCall, ToolResult
 if TYPE_CHECKING:
     from agentkit.callbacks import Callbacks
     from agentkit.memory.budget import ContextBudget
+    from agentkit.memory.session import Session, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class Agent:
         output_type: type[BaseModel] | None = None,
         callbacks: Callbacks | None = None,
         context_budget: ContextBudget | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -77,6 +79,7 @@ class Agent:
         self.output_type = output_type
         self._callbacks = callbacks
         self._context_budget = context_budget
+        self._session_store = session_store
         self._setup_tools(tools)
 
     # ── Setup ─────────────────────────────────────────────────────────────────
@@ -110,9 +113,26 @@ class Agent:
         self,
         user_input: str,
         context: ExecutionContext | None = None,
+        session: Session | None = None,
     ) -> AgentResult:
-        """Run the agent on *user_input* and return the final result."""
-        ctx = context or ExecutionContext()
+        """Run the agent on *user_input* and return the final result.
+
+        When *session* is provided the previous event history is loaded into
+        the context before the new turn, and new events are persisted back to
+        the store at the end of the run.
+        """
+        if session is not None and context is None:
+            ctx = self._load_session_contents(session)
+        else:
+            ctx = context or ExecutionContext()
+
+        if session is not None:
+            # Let tools write to session.state directly through context.state
+            ctx.state["session_state"] = session.state
+
+        # Remember the event count before this turn so we can capture new events
+        events_before = len(ctx.events)
+
         ctx.add_message("user", user_input, author=self.name)
 
         final_result: str | BaseModel | None = None
@@ -125,15 +145,40 @@ class Agent:
 
         if run_error is not None:
             ctx.final_result = ""
-            return AgentResult(output="", error=run_error, context=ctx)
+            result = AgentResult(output="", error=run_error, context=ctx)
+        else:
+            output: str | BaseModel = (
+                final_result
+                if final_result is not None
+                else f"[max_steps={self.max_steps} reached without final answer]"
+            )
+            ctx.final_result = output
+            result = AgentResult(output=output, context=ctx)
 
-        output: str | BaseModel = (
-            final_result
-            if final_result is not None
-            else f"[max_steps={self.max_steps} reached without final answer]"
-        )
-        ctx.final_result = output
-        return AgentResult(output=output, context=ctx)
+        # Persist new events and state to the session store
+        if session is not None and self._session_store is not None:
+            new_events = ctx.events[events_before:]
+            if new_events:
+                try:
+                    self._session_store.append_events(session.session_id, new_events)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to persist session events: %s", exc)
+            state_patch = dict(session.state)
+            if state_patch:
+                try:
+                    self._session_store.update_state(session.session_id, state_patch)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to persist session state: %s", exc)
+
+        return result
+
+    def _load_session_contents(self, session: Session) -> ExecutionContext:
+        """Build an ExecutionContext pre-loaded with this session's event history."""
+        ctx = ExecutionContext()
+        for evt in session.events:
+            ctx.add_event(evt)
+        ctx.state.update(session.state)
+        return ctx
 
     # ── Loop internals ─────────────────────────────────────────────────────────
 

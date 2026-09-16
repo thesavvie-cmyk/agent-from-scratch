@@ -18,3 +18,8 @@ wheels/
 
 # Experiment outputs
 results/
+
+# Session databases (default location is ~/.agentkit/, but protect project-local ones too)
+*.db
+*.db-shm
+*.db-wal
