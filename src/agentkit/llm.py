@@ -6,12 +6,14 @@ LlmClient wraps LiteLLM's acompletion with:
   configuration errors (bad API key, unknown model) → re-raise
 - _build_messages reuses transcript.items_to_messages so the conversion
   logic lives in exactly one place
+- Optional BudgetGuard integration (block 9): check() before each call,
+  record() after success.  BudgetExceededError propagates like a config error.
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import litellm
 from pydantic import BaseModel, ConfigDict
@@ -19,6 +21,9 @@ from pydantic import BaseModel, ConfigDict
 from agentkit.tools.base import BaseTool
 from agentkit.transcript import items_to_messages
 from agentkit.types import ContentItem, Message, ToolCall
+
+if TYPE_CHECKING:
+    from agentkit.budget import BudgetGuard
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +64,14 @@ class LlmClient:
     response into ContentItems, and returns an LlmResponse.
     """
 
-    def __init__(self, model: str, **config: Any) -> None:
+    def __init__(
+        self,
+        model: str,
+        budget_guard: BudgetGuard | None = None,
+        **config: Any,
+    ) -> None:
         self._model = model
+        self._budget_guard = budget_guard
         self._config = config
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -70,10 +81,14 @@ class LlmClient:
 
         Transient errors (network, timeout, rate-limit) are caught and
         returned as LlmResponse(error_message=...).
-        Configuration errors (bad key, unknown model) are re-raised so the
-        caller can surface them immediately — the model cannot self-correct
-        these.
+        Configuration errors (bad key, unknown model, budget exceeded) are
+        re-raised so the caller can surface them immediately.
         """
+        # Budget check happens BEFORE the try/except so BudgetExceededError
+        # propagates like a configuration error, not a transient failure.
+        if self._budget_guard is not None:
+            self._budget_guard.check()
+
         messages = self._build_messages(request)
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -87,12 +102,19 @@ class LlmClient:
 
         try:
             raw = await litellm.acompletion(**kwargs)
-            return self._parse_response(raw)
+            response = self._parse_response(raw)
         except _CONFIG_ERRORS:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("LlmClient.generate error: %s", exc)
             return LlmResponse(error_message=str(exc), usage_metadata={})
+
+        if self._budget_guard is not None:
+            self._budget_guard.record(
+                response.usage_metadata.get("input_tokens", 0),
+                response.usage_metadata.get("output_tokens", 0),
+            )
+        return response
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=agentkit AI agent service
+After=network.target
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/home/agent/agent-from-scratch
+EnvironmentFile=/home/agent/agent-from-scratch/.env
+ExecStart=/home/agent/.local/bin/uv run agent chat
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentkit
+
+[Install]
+WantedBy=multi-user.target
