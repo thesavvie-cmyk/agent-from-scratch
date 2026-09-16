@@ -3,6 +3,7 @@
 Usage:
     uv run agent ask "what is 2+2?"
     uv run agent chat
+    uv run agent serve          # long-running daemon mode (used by systemd)
     uv run agent doctor [--json]
     uv run agent budget [--json]
 
@@ -158,6 +159,30 @@ async def cmd_chat(args: argparse.Namespace) -> None:
             await _run_session(tools)
 
 
+# ── serve (daemon mode for systemd) ──────────────────────────────────────────
+
+
+async def cmd_serve() -> None:
+    """Long-running daemon mode — blocks until SIGTERM/SIGINT.
+
+    In block 22 this becomes an A2A server.  For now it just keeps the
+    process alive so systemd can manage it as a persistent service.
+    """
+    import signal
+
+    logger.info("agentkit serve: started, waiting for requests")
+    print("agentkit serve: running (block 22 will add A2A server here)", flush=True)
+
+    stop = asyncio.Event()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+
+    await stop.wait()
+    logger.info("agentkit serve: shutting down")
+
+
 # ── doctor ────────────────────────────────────────────────────────────────────
 
 
@@ -218,6 +243,9 @@ def _build_parser() -> argparse.ArgumentParser:
     chat_p = sub.add_parser("chat", help="Interactive multi-turn chat")
     _add_run_flags(chat_p)
 
+    # serve
+    sub.add_parser("serve", help="Long-running daemon mode (used by systemd)")
+
     # doctor
     doc_p = sub.add_parser("doctor", help="Check system health and connectivity")
     doc_p.add_argument("--json", action="store_true", dest="json_out")
@@ -252,6 +280,8 @@ def main() -> None:
         sys.exit(asyncio.run(cmd_ask(args)))
     elif args.command == "chat":
         asyncio.run(cmd_chat(args))
+    elif args.command == "serve":
+        asyncio.run(cmd_serve())
     elif args.command == "doctor":
         sys.exit(asyncio.run(cmd_doctor(args)))
     elif args.command == "budget":
