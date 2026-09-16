@@ -205,9 +205,12 @@ async def main(limit: int | None) -> None:
     print(f"Running {len(problems)} tasks (model={FAST_MODEL}, max_steps={MAX_STEPS}).\n")
 
     # max_tokens=12_000 with calibration_factor=1.1 fires when the heuristic
-    # exceeds 12_000 / 1.1 ≈ 10_900 content tokens.  Typical 6-step haiku
-    # tasks accumulate ~10-15K content tokens, so compaction fires once
-    # around step 4-5.  keep_recent=3 preserves the last 3 search results.
+    # exceeds 12_000 / 1.1 ≈ 10_900 content tokens — around step 4-5 for
+    # typical haiku tasks.  keep_recent=3 preserves the last 3 search results.
+    #
+    # At 8K the budget fires 2-3x per task, causing agents to re-search
+    # evicted results and hit max_steps without finishing (loops). 12K fires
+    # once per heavy task with minimal accuracy impact.
     budget = ContextBudget(
         max_tokens=12_000,
         strategies=[TruncateOldToolResults(keep_recent=3)],
