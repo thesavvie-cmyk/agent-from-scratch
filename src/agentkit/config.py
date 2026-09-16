@@ -14,6 +14,7 @@ SMART_MODEL: str = os.getenv("SMART_MODEL", "anthropic/claude-sonnet-5")
 TRACKED_KEYS: list[str] = [
     "ANTHROPIC_API_KEY",
     "TAVILY_API_KEY",
+    "VOYAGE_API_KEY",
     "HF_TOKEN",
     "E2B_API_KEY",
 ]

@@ -12,6 +12,8 @@ dependencies = [
     "tavily-python",
     "mcp",
     "psutil",
+    "numpy",
+    "voyageai",
 ]
 
 [project.scripts]
@@ -27,6 +29,9 @@ eval = [
     "datasets",
     "tqdm",
     "pandas",
+]
+local = [
+    "fastembed",
 ]
 
 [tool.pytest.ini_options]
