@@ -1,9 +1,10 @@
 """Agent class — ReAct loop with structured output support (block 8)."""
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -12,6 +13,9 @@ from agentkit.llm import LlmClient, LlmRequest, LlmResponse
 from agentkit.schema import build_tool_definition
 from agentkit.tools.base import BaseTool, FunctionTool
 from agentkit.types import Event, Message, ToolCall, ToolResult
+
+if TYPE_CHECKING:
+    from agentkit.callbacks import Callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +66,14 @@ class Agent:
         max_steps: int = 10,
         name: str = "agent",
         output_type: type[BaseModel] | None = None,
+        callbacks: Callbacks | None = None,
     ) -> None:
         self.model = model
         self.instructions = instructions
         self.max_steps = max_steps
         self.name = name
         self.output_type = output_type
+        self._callbacks = callbacks
         self._setup_tools(tools)
 
     # ── Setup ─────────────────────────────────────────────────────────────────
@@ -131,7 +137,16 @@ class Agent:
     async def _step(self, context: ExecutionContext) -> str | BaseModel | None:
         """One think→act cycle.  Returns the final result or None to continue."""
         request = self._prepare_llm_request(context)
+
+        if self._callbacks:
+            for cb in self._callbacks.before_model:
+                await self._invoke_callback(cb, context, request)
+
         response = await self.think(request)
+
+        if self._callbacks:
+            for cb in self._callbacks.after_model:
+                await self._invoke_callback(cb, context, response)
 
         # Accumulate token usage in context state for downstream reporting
         _usage = context.state.setdefault(
@@ -197,6 +212,8 @@ class Agent:
         tool_calls: list[ToolCall],
     ) -> list[ToolResult]:
         """Execute tool calls; unknown tools and exceptions → status='error'."""
+        from agentkit.callbacks import SkipTool
+
         results: list[ToolResult] = []
         for call in tool_calls:
             tool = self._toolbox.get(call.name)
@@ -210,27 +227,68 @@ class Agent:
                     )
                 )
                 continue
-            try:
-                result = await tool.execute(context, **call.arguments)
-                results.append(
-                    ToolResult(
-                        tool_call_id=call.tool_call_id,
-                        name=call.name,
-                        status="success",
-                        content=[result],
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Tool %r raised: %s", call.name, exc)
+
+            # ── before_tool callbacks ──────────────────────────────────────────
+            args: dict[str, Any] = dict(call.arguments)
+            skip: SkipTool | None = None
+            if self._callbacks:
+                for cb in self._callbacks.before_tool:
+                    rv = await self._invoke_callback(cb, context, call.name, args)
+                    if isinstance(rv, SkipTool):
+                        skip = rv
+                        break
+                    if isinstance(rv, dict):
+                        args = rv
+
+            if skip is not None:
                 results.append(
                     ToolResult(
                         tool_call_id=call.tool_call_id,
                         name=call.name,
                         status="error",
-                        content=[f"Error: {exc}"],
+                        content=[f"Tool skipped: {skip.reason}"],
                     )
                 )
+                continue
+
+            # ── execute ────────────────────────────────────────────────────────
+            try:
+                raw = await tool.execute(context, **args)
+                tool_result = ToolResult(
+                    tool_call_id=call.tool_call_id,
+                    name=call.name,
+                    status="success",
+                    content=[raw],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Tool %r raised: %s", call.name, exc)
+                tool_result = ToolResult(
+                    tool_call_id=call.tool_call_id,
+                    name=call.name,
+                    status="error",
+                    content=[f"Error: {exc}"],
+                )
+
+            # ── after_tool callbacks ───────────────────────────────────────────
+            if self._callbacks:
+                for cb in self._callbacks.after_tool:
+                    rv = await self._invoke_callback(cb, context, call.name, tool_result)
+                    if isinstance(rv, ToolResult):
+                        tool_result = rv
+
+            results.append(tool_result)
         return results
+
+    async def _invoke_callback(self, cb: Any, *args: Any) -> Any:
+        """Call a sync or async callback; log and return None on exception."""
+        try:
+            rv = cb(*args)
+            if inspect.isawaitable(rv):
+                rv = await rv
+            return rv
+        except Exception as exc:  # noqa: BLE001
+            name = getattr(cb, "__name__", repr(cb))
+            logger.warning("Callback %r raised: %s", name, exc)
 
     def _is_final_response(self, event: Event) -> bool:
         """True when the think event signals a terminal response."""
