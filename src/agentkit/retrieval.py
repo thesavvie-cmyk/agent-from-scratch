@@ -72,8 +72,26 @@ class VectorIndex:
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
-    def search(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        min_score: float | None = None,
+    ) -> list[dict[str, Any]]:
         """Return the *top_k* most similar chunks to *query*.
+
+        Parameters
+        ----------
+        query:
+            Search string.
+        top_k:
+            Maximum number of results to return.
+        min_score:
+            If set, only results with cosine similarity >= *min_score* are
+            returned.  Use this to avoid returning irrelevant chunks when the
+            index contains no good match — vector search always returns *top_k*
+            results otherwise, even if none are relevant.  Typical values:
+            0.5–0.7 for fastembed bge-small; calibrate per model.
 
         Returns a list of dicts, each with keys:
             ``text``     — the stored text
@@ -89,7 +107,7 @@ class VectorIndex:
         k = min(top_k, len(scores))
         top_idx = np.argsort(scores)[::-1][:k]
 
-        return [
+        results = [
             {
                 "text": self._texts[i],
                 "score": float(scores[i]),
@@ -97,6 +115,9 @@ class VectorIndex:
             }
             for i in top_idx
         ]
+        if min_score is not None:
+            results = [r for r in results if r["score"] >= min_score]
+        return results
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
