@@ -204,8 +204,12 @@ async def main(limit: int | None) -> None:
     problems = load_search_tasks(limit=limit)
     print(f"Running {len(problems)} tasks (model={FAST_MODEL}, max_steps={MAX_STEPS}).\n")
 
+    # max_tokens=12_000 with calibration_factor=1.1 fires when the heuristic
+    # exceeds 12_000 / 1.1 ≈ 10_900 content tokens.  Typical 6-step haiku
+    # tasks accumulate ~10-15K content tokens, so compaction fires once
+    # around step 4-5.  keep_recent=3 preserves the last 3 search results.
     budget = ContextBudget(
-        max_tokens=30_000,
+        max_tokens=12_000,
         strategies=[TruncateOldToolResults(keep_recent=3)],
     )
 
