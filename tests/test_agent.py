@@ -198,24 +198,27 @@ def test_setup_tools_adds_final_answer():
     assert "properties" in schema["function"]["parameters"]
 
 
-def test_prepare_request_tool_choice_required_with_output_type():
+@pytest.mark.asyncio
+async def test_prepare_request_tool_choice_required_with_output_type():
     agent = Agent(model=MagicMock(), output_type=_Out, max_steps=5)
     ctx = ExecutionContext()
-    req = agent._prepare_llm_request(ctx)
+    req = await agent._prepare_llm_request(ctx)
     assert req.tool_choice == "required"
 
 
-def test_prepare_request_tool_choice_auto_with_tools():
+@pytest.mark.asyncio
+async def test_prepare_request_tool_choice_auto_with_tools():
     agent = Agent(model=MagicMock(), tools=[fake_tool], max_steps=5)
     ctx = ExecutionContext()
-    req = agent._prepare_llm_request(ctx)
+    req = await agent._prepare_llm_request(ctx)
     assert req.tool_choice == "auto"
 
 
-def test_prepare_request_tool_choice_none_no_tools():
+@pytest.mark.asyncio
+async def test_prepare_request_tool_choice_none_no_tools():
     agent = Agent(model=MagicMock(), max_steps=5)
     ctx = ExecutionContext()
-    req = agent._prepare_llm_request(ctx)
+    req = await agent._prepare_llm_request(ctx)
     assert req.tool_choice is None
 
 

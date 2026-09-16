@@ -16,6 +16,7 @@ from agentkit.types import Event, Message, ToolCall, ToolResult
 
 if TYPE_CHECKING:
     from agentkit.callbacks import Callbacks
+    from agentkit.memory.budget import ContextBudget
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class Agent:
         name: str = "agent",
         output_type: type[BaseModel] | None = None,
         callbacks: Callbacks | None = None,
+        context_budget: ContextBudget | None = None,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -74,6 +76,7 @@ class Agent:
         self.name = name
         self.output_type = output_type
         self._callbacks = callbacks
+        self._context_budget = context_budget
         self._setup_tools(tools)
 
     # ── Setup ─────────────────────────────────────────────────────────────────
@@ -136,7 +139,7 @@ class Agent:
 
     async def _step(self, context: ExecutionContext) -> str | BaseModel | None:
         """One think→act cycle.  Returns the final result or None to continue."""
-        request = self._prepare_llm_request(context)
+        request = await self._prepare_llm_request(context)
 
         if self._callbacks:
             for cb in self._callbacks.before_model:
@@ -184,9 +187,22 @@ class Agent:
         context.increment_step()
         return None
 
-    def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
+    async def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
         instructions = [self.instructions] if self.instructions else []
         contents = list(context.iter_content())
+
+        if self._context_budget is not None:
+            contents, report = await self._context_budget.fit(contents, context)
+            if report["applied"]:
+                log = context.state.setdefault("compaction_log", [])
+                log.append(
+                    {
+                        "step": context.current_step,
+                        "original_tokens": report["original_tokens"],
+                        "final_tokens": report["final_tokens"],
+                        "applied": report["applied"],
+                    }
+                )
 
         if self.output_tool_name is not None:
             tool_choice: str | None = "required"
