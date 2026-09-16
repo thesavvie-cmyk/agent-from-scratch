@@ -29,12 +29,12 @@ sys.path.insert(0, str(_ROOT / "src"))
 
 from agentkit.agent import Agent
 from agentkit.budget import BudgetGuard
-from agentkit.config import FAST_MODEL
+from agentkit.config import FAST_MODEL, find_uv
 from agentkit.llm import LlmClient
 from agentkit.mcp_client import McpToolset
 from agentkit.tools.mcp import load_mcp_tools
 
-_MCP_CMD = ("uv", ["run", "python", "-m", "agentkit.servers.tavily_server"])
+_MCP_CMD = (find_uv(), ["run", "python", "-m", "agentkit.servers.tavily_server"])
 
 # ── Fixed question set ────────────────────────────────────────────────────────
 

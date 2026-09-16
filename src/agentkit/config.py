@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -31,6 +33,22 @@ def require_env(name: str) -> str:
     if not value:
         raise MissingEnvError(name)
     return value
+
+
+def find_uv() -> str:
+    """Return the path to the uv binary.
+
+    Checks PATH first, then the common user-local install location
+    (~/.local/bin/uv on Linux/macOS).  Falls back to bare "uv" so the
+    OS error message stays informative when it's truly missing.
+    """
+    found = shutil.which("uv")
+    if found:
+        return found
+    candidate = Path.home() / ".local" / "bin" / "uv"
+    if candidate.exists():
+        return str(candidate)
+    return "uv"
 
 
 def env_status() -> dict[str, bool]:

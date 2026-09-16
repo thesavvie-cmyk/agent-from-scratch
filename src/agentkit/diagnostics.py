@@ -98,9 +98,10 @@ def _check_anthropic_api() -> dict[str, Any]:
 
 
 async def _check_mcp_cold_start() -> dict[str, Any]:
+    from agentkit.config import find_uv
     from agentkit.mcp_client import McpToolset
 
-    cmd = "uv"
+    cmd = find_uv()
     args = ["run", "python", "-m", "agentkit.servers.tavily_server"]
     t0 = time.perf_counter()
     try:

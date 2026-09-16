@@ -43,7 +43,7 @@ if sys.platform == "win32":
 from tqdm.asyncio import tqdm_asyncio
 
 from agentkit.agent import Agent
-from agentkit.config import FAST_MODEL, SMART_MODEL
+from agentkit.config import FAST_MODEL, SMART_MODEL, find_uv
 from agentkit.gaia import GaiaOutput, is_correct, load_search_tasks
 from agentkit.llm import LlmClient
 from agentkit.mcp_client import McpToolset
@@ -51,7 +51,7 @@ from agentkit.prompts import GAIA_AGENT_PROMPT
 from agentkit.tools.base import BaseTool
 from agentkit.tools.mcp import load_mcp_tools
 
-MCP_CMD = ("uv", ["run", "python", "-m", "agentkit.servers.tavily_server"])
+MCP_CMD = (find_uv(), ["run", "python", "-m", "agentkit.servers.tavily_server"])
 RESULTS_DIR = Path(__file__).parent.parent / "results"
 TRACES_DIR = RESULTS_DIR / "ch04_traces"
 MAX_STEPS = 8

@@ -28,14 +28,16 @@ if sys.platform == "win32":
 
 from agentkit.agent import Agent
 from agentkit.budget import BudgetGuard
-from agentkit.config import FAST_MODEL
+from agentkit.config import FAST_MODEL, find_uv
 from agentkit.llm import LlmClient
 from agentkit.mcp_client import McpToolset
 from agentkit.prompts import GAIA_AGENT_PROMPT
 from agentkit.tools.mcp import load_mcp_tools
 from agentkit.utils import display_trace
 
-_MCP_CMD = ("uv", ["run", "python", "-m", "agentkit.servers.tavily_server"])
+
+def _mcp_cmd() -> tuple[str, list[str]]:
+    return (find_uv(), ["run", "python", "-m", "agentkit.servers.tavily_server"])
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ async def cmd_ask(args: argparse.Namespace) -> int:
         agent = _make_agent(model, [], args.max_steps)
         result = await agent.run(args.question)
     else:
-        async with McpToolset(*_MCP_CMD) as ts:
+        async with McpToolset(*_mcp_cmd()) as ts:
             tools = load_mcp_tools(ts)
             agent = _make_agent(model, tools, args.max_steps)
             result = await agent.run(args.question)
@@ -151,7 +153,7 @@ async def cmd_chat(args: argparse.Namespace) -> None:
     if args.no_tools:
         await _run_session([])
     else:
-        async with McpToolset(*_MCP_CMD) as ts:
+        async with McpToolset(*_mcp_cmd()) as ts:
             tools = load_mcp_tools(ts)
             await _run_session(tools)
 
