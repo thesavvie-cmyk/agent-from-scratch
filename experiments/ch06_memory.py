@@ -133,9 +133,26 @@ async def section_b() -> None:
         "People call me Bob.",
     ]
 
-    print("\n  Adding three phrasings with different dedup thresholds:")
-    print(f"\n  {'Threshold':>10}  {'Records stored':>15}  {'Search score (top-1 vs phrasing 2, 3)'}")
-    print(f"  {'─'*10}  {'─'*15}  {'─'*40}")
+    # Show pairwise dedup similarities first — these are the numbers that
+    # determine whether dedup fires.  Both paths (dedup and search) use the
+    # same formula: score = 1 - chroma_cosine_distance = cosine_similarity.
+    mem_ref = _fresh_memory("b_ref")
+    mem_ref.add(user_id=user_id, text=phrasings[0])
+    sims: dict[tuple[int, int], float] = {}
+    for j, phrase in enumerate(phrasings[1:], start=1):
+        r = mem_ref._nearest_for_user(user_id, phrase)
+        if r:
+            sims[(0, j)] = r[1]
+        mem_ref.add(user_id=user_id, text=phrase)
+
+    print("\n  Pairwise cosine similarities (same scale as dedup threshold):")
+    for (i, j), s in sims.items():
+        print(f"    sim(p{i+1}, p{j+1}) = {s:.4f}  "
+              f"({'dedup fires at threshold <= ' + str(round(s, 2)) if s >= 0.80 else 'kept separate at threshold 0.80'})")
+
+    print("\n  Records stored vs threshold:")
+    print(f"\n  {'Threshold':>10}  {'Records':>8}  {'Outcome'}")
+    print(f"  {'─'*10}  {'─'*8}  {'─'*40}")
 
     for threshold in [0.95, 0.90, 0.80]:
         mem = _fresh_memory(f"b_{int(threshold*100)}")
@@ -144,15 +161,8 @@ async def section_b() -> None:
             mem.add(user_id=user_id, text=phrase)
 
         all_mems = mem.list_all(user_id)
-        # Search to get similarity scores between phrasings
-        scores = []
-        for phrase in phrasings[1:]:
-            results = mem.search(user_id=user_id, query=phrase, top_k=1, min_score=0.0)
-            if results:
-                scores.append(f"{results[0].score:.3f}")
-
-        score_str = ", ".join(scores)
-        print(f"  {threshold:>10.2f}  {len(all_mems):>15}  {score_str}")
+        texts = [m.text[:25] for m in all_mems]
+        print(f"  {threshold:>10.2f}  {len(all_mems):>8}  {' | '.join(texts)}")
 
     # Detailed view at threshold=0.9
     print("\n  Detail at threshold=0.90:")
