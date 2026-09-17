@@ -25,11 +25,19 @@ Do not add dependencies not mentioned in the current block's task.
 
 Do **not** read `../reference` unless the user explicitly asks for a comparison.
 
+## Session Start
+
+At the start of every session (or after any restart/interruption):
+1. Read `PROGRESS.md` to see current block and status
+2. Run `git log --oneline -15` to see recent commits
+3. Do NOT rely on conversation memory -- the state is in files and git
+
 ## Block Completion
 
 At the end of each block:
-1. Commit: `git commit -m "block N: <brief description>"`
-2. Report to the user in Russian:
+1. Update `PROGRESS.md`: mark block as done, add a note with key result
+2. Commit both together: `git commit -m "block N: <brief description>"`
+3. Report to the user in Russian:
    - What was done
    - Key decisions and reasoning
    - What remains unclear or worth revisiting
