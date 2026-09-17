@@ -8,12 +8,16 @@ SERVER_USER="${DEPLOY_USER:-agent}"
 SERVER_HOST="${DEPLOY_HOST:?Set DEPLOY_HOST to your server IP or hostname}"
 REMOTE_DIR="/home/${SERVER_USER}/agent-from-scratch"
 
-# ── Safety: never sync session databases ──────────────────────────────────────
-# Session databases (*.db, *.db-shm, *.db-wal) contain conversation history.
-# They are git-ignored and must never travel with deploys or backups.
-# If you add rsync to this script, always pass:  --exclude='*.db*'
-# Example:
-#   rsync -av --exclude='*.db*' --exclude='.env' src/ user@host:dst/
+# ── Safety: never sync user data ──────────────────────────────────────────────
+# Session databases (*.db) and ChromaDB memory stores (chroma.sqlite3, *.parquet)
+# contain conversation history and personal facts about users.
+# They are git-ignored and MUST never travel with deploys or backups.
+# If you add rsync to this script, always pass:
+#   --exclude='*.db*' --exclude='chroma.sqlite3' --exclude='*.parquet'
+# Full example:
+#   rsync -av --exclude='*.db*' --exclude='chroma.sqlite3' \
+#             --exclude='*.parquet' --exclude='.env' \
+#             src/ user@host:dst/
 
 # ── Pull latest code ──────────────────────────────────────────────────────────
 echo "==> Pulling latest code on ${SERVER_USER}@${SERVER_HOST}"

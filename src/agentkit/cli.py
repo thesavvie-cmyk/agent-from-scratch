@@ -201,6 +201,63 @@ async def cmd_chat(args: argparse.Namespace) -> None:
             await _run_session(tools)
 
 
+# ── memory ────────────────────────────────────────────────────────────────────
+
+
+def cmd_memory(args: argparse.Namespace) -> None:
+    """List, search, or delete long-term memories."""
+    from agentkit.memory.longterm import LongTermMemory
+
+    # LongTermMemory lazy-loads ChromaDB; only imported when this subcommand runs
+    mem = LongTermMemory()
+    user_id: str = getattr(args, "user", "default")
+
+    if getattr(args, "forget", None):
+        ok = mem.delete(args.forget)
+        if ok:
+            print(f"Deleted memory {args.forget}")
+        else:
+            print(f"Memory not found: {args.forget}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if getattr(args, "forget_all", False):
+        n = mem.delete_user(user_id)
+        print(f"Deleted {n} memory record(s) for user '{user_id}'")
+        return
+
+    if getattr(args, "search_query", None):
+        import datetime
+
+        results = mem.search(user_id=user_id, query=args.search_query, min_score=0.0, top_k=10)
+        if not results:
+            print(f"No memories found for user '{user_id}'")
+            return
+        print(f"\n  Memories for '{user_id}' matching '{args.search_query}':\n")
+        print(f"  {'Score':>6}  {'Updated':<20}  {'Text'}")
+        print(f"  {'─'*6}  {'─'*20}  {'─'*50}")
+        for m in results:
+            updated = datetime.datetime.fromtimestamp(m.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"  {m.score:>6.3f}  {updated:<20}  {m.text[:80]}")
+        print()
+        return
+
+    # Default: list all
+    import datetime
+
+    memories = mem.list_all(user_id)
+    if not memories:
+        print(f"No memories for user '{user_id}'")
+        return
+    print(f"\n  Memories for user '{user_id}' ({len(memories)} total):\n")
+    print(f"  {'ID':<38}  {'Updated':<20}  {'Text'}")
+    print(f"  {'─'*38}  {'─'*20}  {'─'*50}")
+    for m in memories:
+        updated = datetime.datetime.fromtimestamp(m.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"  {m.id:<38}  {updated:<20}  {m.text[:80]}")
+    print()
+
+
 # ── sessions ──────────────────────────────────────────────────────────────────
 
 
@@ -368,6 +425,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Session ID to resume (creates new if not found)",
     )
 
+    # memory
+    mem_p = sub.add_parser("memory", help="List, search, or delete long-term memories")
+    mem_p.add_argument("--user", default="default", help="User ID (default: 'default')")
+    mem_p.add_argument("--list", action="store_true", dest="list_mem",
+                       help="List all memories (default action)")
+    mem_p.add_argument("--search", metavar="QUERY", dest="search_query",
+                       help="Search memories by query")
+    mem_p.add_argument("--forget", metavar="ID", help="Delete one memory by ID")
+    mem_p.add_argument("--forget-all", action="store_true", dest="forget_all",
+                       help="Delete all memories for user")
+
     # sessions
     sess_p = sub.add_parser("sessions", help="List, inspect, or delete sessions")
     sess_p.add_argument("--user", default="default", help="User ID (default: 'default')")
@@ -420,5 +488,7 @@ def main() -> None:
         sys.exit(asyncio.run(cmd_doctor(args)))
     elif args.command == "budget":
         cmd_budget(args)
+    elif args.command == "memory":
+        cmd_memory(args)
     elif args.command == "sessions":
         cmd_sessions(args)

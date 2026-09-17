@@ -17,6 +17,7 @@ from agentkit.types import Event, Message, ToolCall, ToolResult
 if TYPE_CHECKING:
     from agentkit.callbacks import Callbacks
     from agentkit.memory.budget import ContextBudget
+    from agentkit.memory.longterm import LongTermMemory
     from agentkit.memory.session import Session, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,8 @@ class Agent:
         callbacks: Callbacks | None = None,
         context_budget: ContextBudget | None = None,
         session_store: SessionStore | None = None,
+        memory: LongTermMemory | None = None,
+        user_id: str = "default",
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -80,6 +83,8 @@ class Agent:
         self._callbacks = callbacks
         self._context_budget = context_budget
         self._session_store = session_store
+        self._memory = memory
+        self._user_id = user_id
         self._setup_tools(tools)
 
     # ── Setup ─────────────────────────────────────────────────────────────────
@@ -130,6 +135,11 @@ class Agent:
             # Let tools write to session.state directly through context.state
             ctx.state["session_state"] = session.state
 
+        # Inject relevant long-term memories into context BEFORE first LLM call.
+        # Stored in context.state so _prepare_llm_request picks it up once.
+        if self._memory is not None:
+            await self._inject_memories(ctx, user_input)
+
         # Remember the event count before this turn so we can capture new events
         events_before = len(ctx.events)
 
@@ -154,6 +164,19 @@ class Agent:
             )
             ctx.final_result = output
             result = AgentResult(output=output, context=ctx)
+
+        # Fire-and-forget: extract memories from this run and persist them.
+        # We return result first, then the extraction task runs when the event
+        # loop is next idle.  asyncio.create_task() is used (not ensure_future)
+        # so the task is associated with the running loop and gets a proper
+        # exception traceback if it fails.  In CLI usage the loop stays alive
+        # for the next user prompt, giving the task time to complete.
+        if self._memory is not None and not result.error:
+            import asyncio
+            new_events = ctx.events[events_before:]
+            asyncio.create_task(  # noqa: RUF006
+                self._save_memories(new_events)
+            )
 
         # Persist new events and state to the session store
         if session is not None and self._session_store is not None:
@@ -232,8 +255,56 @@ class Agent:
         context.increment_step()
         return None
 
+    async def _inject_memories(self, context: ExecutionContext, query: str) -> None:
+        """Search long-term memory and store results in context.state."""
+        assert self._memory is not None
+        try:
+            memories = self._memory.search(
+                user_id=self._user_id,
+                query=query,
+                top_k=5,
+                min_score=0.5,
+            )
+            if memories:
+                block = "What is known about the user:\n" + "\n".join(
+                    f"- {m.text}" for m in memories
+                )
+                context.state["memory_context"] = block
+                logger.debug(
+                    "Injected %d memories for user %s", len(memories), self._user_id
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Memory injection failed: %s", exc)
+
+    async def _save_memories(self, events: list[Event]) -> None:
+        """Extract facts from *events* and persist to long-term memory."""
+        assert self._memory is not None
+        try:
+            from agentkit.memory.extraction import extract_memories
+
+            existing = [m.text for m in self._memory.list_all(self._user_id)[:50]]
+            facts = await extract_memories(self.model, events, existing=existing)
+            for fact in facts:
+                self._memory.add(
+                    user_id=self._user_id,
+                    text=fact,
+                    source_session_id=events[0].execution_id if events else None,
+                )
+            if facts:
+                logger.debug(
+                    "Saved %d memory facts for user %s", len(facts), self._user_id
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Memory save failed: %s", exc)
+
     async def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
         instructions = [self.instructions] if self.instructions else []
+
+        # Append memory context block if injected (added once at run() start)
+        memory_ctx = context.state.get("memory_context")
+        if memory_ctx:
+            instructions = list(instructions) + [memory_ctx]
+
         contents = list(context.iter_content())
 
         if self._context_budget is not None:

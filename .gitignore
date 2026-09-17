@@ -19,7 +19,10 @@ wheels/
 # Experiment outputs
 results/
 
-# Session databases (default location is ~/.agentkit/, but protect project-local ones too)
+# Session databases and long-term memory (default: ~/.agentkit/; never commit)
 *.db
 *.db-shm
 *.db-wal
+# ChromaDB memory store (default: ~/.agentkit/memory/)
+chroma.sqlite3
+*.parquet

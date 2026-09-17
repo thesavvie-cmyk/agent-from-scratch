@@ -15,6 +15,7 @@ dependencies = [
     "numpy",
     "voyageai",
     "openpyxl",
+    "chromadb>=1.5.9",
 ]
 
 [project.scripts]
