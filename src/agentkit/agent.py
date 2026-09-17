@@ -165,18 +165,14 @@ class Agent:
             ctx.final_result = output
             result = AgentResult(output=output, context=ctx)
 
-        # Fire-and-forget: extract memories from this run and persist them.
-        # We return result first, then the extraction task runs when the event
-        # loop is next idle.  asyncio.create_task() is used (not ensure_future)
-        # so the task is associated with the running loop and gets a proper
-        # exception traceback if it fails.  In CLI usage the loop stays alive
-        # for the next user prompt, giving the task time to complete.
+        # Save memories before returning so the extraction is never silently
+        # dropped.  In short-lived processes (agent ask, scripts) the event
+        # loop exits as soon as run() returns — a fire-and-forget create_task()
+        # would be garbage-collected or never scheduled.  Awaiting here adds
+        # one LLM call's latency but guarantees persistence.
         if self._memory is not None and not result.error:
-            import asyncio
             new_events = ctx.events[events_before:]
-            asyncio.create_task(  # noqa: RUF006
-                self._save_memories(new_events)
-            )
+            await self._save_memories(new_events)
 
         # Persist new events and state to the session store
         if session is not None and self._session_store is not None:

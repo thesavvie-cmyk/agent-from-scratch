@@ -71,14 +71,6 @@ def _make_agent(mem: LongTermMemory, user_id: str, tools: list[Any] | None = Non
     )
 
 
-# ── helpers to drain pending tasks ────────────────────────────────────────────
-
-async def _flush_tasks() -> None:
-    """Let fire-and-forget memory save tasks complete."""
-    # give create_task() coroutines two event-loop iterations to finish
-    for _ in range(5):
-        await asyncio.sleep(0)
-
 
 # ── Section A — cross-session recall ──────────────────────────────────────────
 
@@ -103,7 +95,6 @@ async def section_a() -> None:
         r = await agent1.run(msg, session=session1)
         session1 = store.get(session1.session_id) or session1
         print(f"  Agent: {r.output}")
-    await _flush_tasks()
 
     # Show what was extracted
     all_memories = mem.list_all(user_id)
@@ -143,7 +134,7 @@ async def section_b() -> None:
     ]
 
     print("\n  Adding three phrasings with different dedup thresholds:")
-    print(f"\n  {'Threshold':>10}  {'Records stored':>15}  {'Scores'}")
+    print(f"\n  {'Threshold':>10}  {'Records stored':>15}  {'Search score (top-1 vs phrasing 2, 3)'}")
     print(f"  {'─'*10}  {'─'*15}  {'─'*40}")
 
     for threshold in [0.95, 0.90, 0.80]:
@@ -218,7 +209,6 @@ async def section_c() -> None:
     # Show what an agent would see: memory injected context
     agent = _make_agent(mem, user_id)
     r = await agent.run("Where do I currently live?")
-    await _flush_tasks()
     injected = r.context.state.get("memory_context", "(none)")
     print(f"\n  Memory injected into context:\n  {injected}")
     print(f"\n  Agent answer: {r.output}")

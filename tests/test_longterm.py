@@ -376,7 +376,7 @@ async def test_agent_memory_injected_into_instructions(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_memory_save_called_after_run(tmp_path: Path) -> None:
-    """After run(), memory extraction task fires (fire-and-forget)."""
+    """After run() returns, memory.add() has already been called (awaited save)."""
     from agentkit.agent import Agent
     from agentkit.llm import LlmClient, LlmResponse
 
@@ -421,9 +421,6 @@ async def test_agent_memory_save_called_after_run(tmp_path: Path) -> None:
             user_id="test",
         )
         await agent.run("Hello!")
-        # Flush fire-and-forget tasks
-        for _ in range(10):
-            await asyncio.sleep(0)
         assert save_called, "memory.add() was never called after run()"
     finally:
         ext_mod.extract_memories = original_extract  # type: ignore[assignment]
