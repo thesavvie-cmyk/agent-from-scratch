@@ -7,8 +7,9 @@ Configurations
 
 Special focus
 -------------
-The 9 tasks that hit max_steps=8 in block 8 are tracked separately.
-They are identified from the saved ch04 traces in results/ch04_traces/.
+Tasks that hit max_steps=8 in block 8 are tracked separately (turned out to
+be 10, not 9 as originally estimated).  They are identified from the saved
+ch04 traces in results/ch04_traces/.
 This is the main test of the hypothesis: does planning reduce looping?
 
 Usage
@@ -44,7 +45,7 @@ MCP_CMD = (find_uv(), ["run", "python", "-m", "agentkit.servers.tavily_server"])
 RESULTS_DIR = Path(__file__).parent.parent / "results"
 TRACES_DIR = RESULTS_DIR / "ch04_traces"
 CH07_TRACES_DIR = RESULTS_DIR / "ch07_traces"
-MAX_STEPS = 12  # raised from 8 to give planning room to work
+MAX_STEPS = 8   # same as block 8 — required for fair hit_max_steps comparison
 AGENT_CONCURRENCY = 2  # lower to avoid rate limits
 
 _COST = {FAST_MODEL: {"input": 0.80, "output": 4.00}}
@@ -58,7 +59,7 @@ def _load_ch04_hard_task_ids() -> set[str]:
     if not TRACES_DIR.exists():
         return set()
     hard: set[str] = set()
-    for p in TRACES_DIR.glob("*__haiku*with_tools*.json"):
+    for p in TRACES_DIR.glob("*__claude-haiku-4-5__with_tools.json"):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if data.get("steps", 0) >= 8:
@@ -244,7 +245,9 @@ async def run(limit: int | None) -> None:
 
     hard_ids = _load_ch04_hard_task_ids()
     if hard_ids:
-        print(f"Found {len(hard_ids)} hard tasks from block-8 traces.")
+        print(f"Found {len(hard_ids)} hard tasks from block-8 traces (all 0/10 correct in block 8):")
+        for tid in sorted(hard_ids):
+            print(f"  {tid}")
     else:
         print("No block-8 traces found; hard-task column will show n/a.")
 
