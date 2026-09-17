@@ -54,8 +54,24 @@ def _hr(title: str) -> None:
 # ── Section A — Bridge demo ────────────────────────────────────────────────────
 
 
+_QUERIES = [
+    "Python asyncio best practices 2024",
+    "LLM agent frameworks comparison 2024",
+    "e2b sandbox code execution security",
+    "Tavily search API documentation",
+    "RAG retrieval augmented generation techniques",
+    "vector databases comparison 2024",
+    "LangChain vs LlamaIndex 2024",
+    "OpenAI function calling guide",
+    "Anthropic Claude tool use examples",
+    "agent memory persistence patterns",
+]
+
+
 async def section_a() -> None:
-    _hr("Section A -- Bridge: search_web callable from execute_python")
+    _hr("Section A -- Bridge env mode: 10 searches in one execute_python vs 10 agent rounds")
+
+    import os
 
     import e2b_code_interpreter as e2b
 
@@ -64,53 +80,96 @@ async def section_a() -> None:
     from agentkit.tools.mcp import load_mcp_tools
     from agentkit.tools.sandbox_bridge import SandboxBridge
 
-    async with McpToolset(*MCP_CMD) as ts:
-        search_tools = list(load_mcp_tools(ts))
-
-    search_tool = next((t for t in search_tools if t.name == "search_web"), None)
-    if search_tool is None:
-        print("  ERROR: search_web tool not found in MCP server.")
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    if not tavily_key:
+        print("  SKIP: TAVILY_API_KEY not set.")
         return
 
+    async with McpToolset(*MCP_CMD) as ts:
+        search_tools = list(load_mcp_tools(ts))
+    search_tool = next((t for t in search_tools if t.name == "search_web"), None)
+    if search_tool is None:
+        print("  ERROR: search_web not found.")
+        return
+
+    # ── Config 1: 10 searches inside ONE execute_python call (env bridge) ─────
+    print("\n  [1] 10 searches inside one execute_python (env bridge)...")
     sandbox = await e2b.AsyncSandbox.create(timeout=E2B_TIMEOUT)
     ctx = ExecutionContext()
     ctx.code_env = sandbox
 
     try:
         loop = asyncio.get_running_loop()
-        bridge = SandboxBridge([search_tool], ctx, loop)
-        host, port = bridge.start()
-        print(f"  Bridge started at {host}:{port}")
-        print(f"  Hint: {bridge.instructions_hint()}")
+        bridge = SandboxBridge(
+            [search_tool], ctx, loop, envs={"TAVILY_API_KEY": tavily_key}
+        )
+        host, port = bridge.start()  # no HTTP server (env-only)
+        await sandbox.run_code(bridge.env_setup_code())
+        await sandbox.run_code(bridge.stub_code(host, port))
+        print(f"  Stubs injected. HTTP port={port} (0=env-only). {bridge.instructions_hint()}")
 
-        stubs = bridge.stub_code(host, port)
-        await sandbox.run_code(stubs)
-        print("  Stubs injected into sandbox.")
-
-        # Python code that calls search_web from inside the sandbox
-        code = """
-results = search_web(query="Python asyncio event loop basics")
-import json
-data = json.loads(results)
-titles = [r.get('title', '') for r in data.get('results', data if isinstance(data, list) else [])]
-print("Search returned", len(titles), "results")
-for t in titles[:3]:
-    print(" -", t)
+        queries_py = repr(_QUERIES)
+        code = f"""
+queries = {queries_py}
+results = {{}}
+for q in queries:
+    r = search_web(query=q, max_results=3)
+    first_line = r.split("\\n")[0] if r else "(empty)"
+    results[q] = first_line
+    print(f"  OK: {{q[:40]}}")
+print(f"\\nTotal queries: {{len(results)}}")
 """
         t0 = time.perf_counter()
         execution = await sandbox.run_code(code)
-        elapsed = time.perf_counter() - t0
+        elapsed_single = time.perf_counter() - t0
 
-        print(f"\n  execute_python({elapsed:.1f}s):")
-        for line in (execution.logs.stdout or []):
+        for line in execution.logs.stdout or []:
             print(f"    {line}")
         if execution.error:
             print(f"  ERROR: {execution.error.name}: {execution.error.value}")
-        else:
-            print("  SUCCESS: search_web called from inside sandbox Python code.")
     finally:
         bridge.stop()
         await sandbox.kill()
+
+    # ── Config 2: 10 searches as 10 separate agent tool calls ─────────────────
+    print("\n  [2] 10 searches as 10 separate agent tool-call rounds...")
+
+    agent = Agent(
+        model=LlmClient(FAST_MODEL),
+        tools=search_tools,
+        instructions="Run exactly the searches listed. Do not skip any. Collect all results and report done.",
+        max_steps=20,
+    )
+
+    queries_str = "\n".join(f"- {q}" for q in _QUERIES)
+    t0 = time.perf_counter()
+    result = await agent.run(
+        f"Search the web for each of the following queries (all 10):\n{queries_str}\n"
+        "After all searches, reply 'Done: N searches completed'."
+    )
+    elapsed_rounds = time.perf_counter() - t0
+
+    u = result.context.state.get("token_usage", {})
+    from agentkit.types import ToolCall
+    actual_searches = sum(
+        1 for ev in result.context.events
+        for item in ev.content
+        if isinstance(item, ToolCall) and item.name == "search_web"
+    )
+
+    # ── Comparison table ───────────────────────────────────────────────────────
+    print(f"\n  {'Config':<30} {'Queries':>8} {'Time':>8} {'LLM rounds':>11}")
+    print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*11}")
+    print(f"  {'10 searches in 1 execute_python':<30} {10:>8} {elapsed_single:>7.1f}s {'1 (code call)':>11}")
+    print(
+        f"  {'10 agent tool-call rounds':<30} {actual_searches:>8} "
+        f"{elapsed_rounds:>7.1f}s {result.context.current_step:>10} steps"
+    )
+    print(f"\n  in={u.get('input_tokens', 0)}  out={u.get('output_tokens', 0)}  (agent config only)")
+    print(
+        "\n  Insight: env bridge lets the model issue a search loop inside one "
+        "execute_python call — no extra agent steps, no token overhead per search."
+    )
 
 
 # ── Section B — Workspace file tools ──────────────────────────────────────────

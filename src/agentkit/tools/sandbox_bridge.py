@@ -1,33 +1,48 @@
-"""HTTP bridge: exposes host tools to Python code running inside the sandbox (block 18).
+"""Tool bridge: exposes host tools to Python code inside the sandbox (block 18).
 
-Architecture
-------------
-1.  SandboxBridge starts a lightweight HTTP server on the HOST process.
-2.  Each registered tool is reachable via POST /tool/<name> with a JSON body
-    of kwargs.  The handler dispatches to ``tool.execute()`` on the host and
-    returns JSON ``{"result": "..."}`` or ``{"error": "..."}``.
-3.  ``stub_code(host, port)`` returns Python source that can be injected into
-    the sandbox (via ``sandbox.run_code(stubs)``) once at startup.  Every
-    registered tool becomes a callable Python function inside the sandbox.
-4.  Async tools are called from the background HTTP-server thread via
-    ``asyncio.run_coroutine_threadsafe(coro, main_loop)``.
+Two backends — chosen per tool automatically
+--------------------------------------------
 
-Remote sandboxes (e2b cloud)
-----------------------------
-e2b sandboxes run in the cloud and can make outbound HTTP requests to the
-internet.  For local development on a machine accessible from the sandbox
-(e.g. a VPS, cloud VM, or with an inbound tunnel such as ngrok), set
-``host`` to the publicly reachable address of the host machine.  For unit
-tests and local experimentation a loopback address (127.0.0.1) is sufficient.
+env backend (cloud e2b, default for known tools)
+    The sandbox has full internet access, so it can call external APIs
+    directly.  The bridge injects the required API key as an env var and
+    generates a stub that calls the API over HTTPS — no host process
+    involved at execution time.
+
+    Registered for: search_web (Tavily REST API)
+
+    Security notes
+    --------------
+    • Use a separate Tavily key with a small quota (sandbox-only).
+    • Never inject ANTHROPIC_API_KEY — model-generated code could then call
+      the LLM and make the bill unpredictable.
+    • Pass only the keys needed for the bridged tools, never the full env.
+
+http backend (local / Docker sandboxes)
+    Starts a background-thread HTTP server in the host process.  Stubs use
+    urllib.request to POST kwargs and receive the result.  Works when the
+    sandbox can reach 127.0.0.1 (local Docker template, same-host dev env).
+    Not suitable for remote e2b cloud sandboxes.
 
 Usage
 -----
-    loop = asyncio.get_running_loop()
-    bridge = SandboxBridge(tools=[search_web_tool], context=ctx, loop=loop)
-    host, port = bridge.start()                     # background thread
-    await sandbox.run_code(bridge.stub_code(host, port))  # inject once
-    # From now on, sandbox Python code can call: result = search_web(query="…")
-    bridge.stop()                                   # called in Agent._kill_sandbox
+    # Cloud e2b — env backend picks up automatically for search_web
+    bridge = SandboxBridge(
+        tools=[search_web_tool],
+        context=ctx,
+        loop=loop,
+        envs={"TAVILY_API_KEY": os.environ["TAVILY_API_KEY"]},
+    )
+    host, port = bridge.start()                 # no-op for env-only tools
+    await sandbox.run_code(bridge.env_setup_code())   # inject key
+    await sandbox.run_code(bridge.stub_code(host, port))  # inject functions
+
+    # Local / Docker — http backend
+    bridge = SandboxBridge(tools=[my_local_tool], context=ctx, loop=loop)
+    host, port = bridge.start("127.0.0.1")
+    await sandbox.run_code(bridge.stub_code(host, port))
+
+    bridge.stop()   # called automatically in Agent._kill_sandbox
 """
 from __future__ import annotations
 
@@ -44,25 +59,73 @@ if TYPE_CHECKING:
     from agentkit.tools.base import BaseTool
 
 
+# ── Direct (env-backend) stub registry ────────────────────────────────────────
+# Maps tool_name → callable(envs: dict[str, str]) → Python source string.
+# Add entries here for any tool whose cloud API is directly reachable from
+# the sandbox.  The generated function must match the host tool's return format.
+
+
+def _tavily_search_stub(envs: dict[str, str]) -> str:
+    """Python source for search_web that calls Tavily REST from inside sandbox."""
+    return '''\
+def search_web(query, max_results=5, topic="general", time_range=None):
+    """Search the web using Tavily (direct HTTPS from sandbox)."""
+    import json as _j, os as _o, urllib.request as _r
+    key = _o.environ.get("TAVILY_API_KEY", "")
+    body = {"api_key": key, "query": query,
+            "max_results": max_results, "topic": topic}
+    if time_range:
+        body["time_range"] = time_range
+    data = _j.dumps(body).encode()
+    req = _r.Request(
+        "https://api.tavily.com/search", data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    with _r.urlopen(req, timeout=30) as resp:
+        payload = _j.loads(resp.read())
+    results = payload.get("results", [])
+    if not results:
+        return "(no results)"
+    parts = []
+    for i, r in enumerate(results, 1):
+        parts.append(f"[{i}] {r.get('title', '')}\\n"
+                     f"{r.get('url', '')}\\n"
+                     f"{r.get('content', '')}")
+    return "\\n\\n".join(parts)
+'''
+
+
+_DIRECT_STUBS: dict[str, Any] = {
+    "search_web": _tavily_search_stub,
+}
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
 def _free_port() -> int:
-    """Return an available TCP port on localhost."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
+# ── SandboxBridge ──────────────────────────────────────────────────────────────
+
+
 class SandboxBridge:
-    """HTTP bridge that forwards sandbox→host tool calls via a background thread.
+    """Route each tool to the right backend (env or http) automatically.
 
     Parameters
     ----------
     tools:
-        Host-side tools that sandbox Python code should be able to call.
+        Host-side tools to expose inside the sandbox.
     context:
-        The ExecutionContext for the current agent run (passed to tool.execute).
+        ExecutionContext for the current run (passed to http-backend tools).
     loop:
-        The main asyncio event loop (needed to dispatch async tools from the
-        synchronous HTTP server thread).
+        Main asyncio event loop (for run_coroutine_threadsafe in http mode).
+    envs:
+        Environment variables to inject into the sandbox.  Required for
+        tools that use the env backend (e.g. ``{"TAVILY_API_KEY": "..."}``).
     """
 
     def __init__(
@@ -70,10 +133,22 @@ class SandboxBridge:
         tools: list[BaseTool],
         context: ExecutionContext,
         loop: asyncio.AbstractEventLoop,
+        envs: dict[str, str] | None = None,
     ) -> None:
-        self._tools: dict[str, BaseTool] = {t.name: t for t in tools}
+        self._all_tools: dict[str, BaseTool] = {t.name: t for t in tools}
         self._context = context
         self._loop = loop
+        self._envs: dict[str, str] = dict(envs or {})
+
+        # Partition tools into env-backend (direct API) vs http-backend
+        self._env_tools: dict[str, BaseTool] = {}
+        self._http_tools: dict[str, BaseTool] = {}
+        for name, tool in self._all_tools.items():
+            if name in _DIRECT_STUBS:
+                self._env_tools[name] = tool
+            else:
+                self._http_tools[name] = tool
+
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._host: str = "127.0.0.1"
@@ -82,12 +157,14 @@ class SandboxBridge:
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self, host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
-        """Start the bridge HTTP server in a daemon thread.
+        """Start the HTTP server (only if http-backend tools exist).
 
-        Returns
-        -------
-        (host, port) — pass both to ``stub_code()``.
+        Returns (host, port).  For env-only setups port=0 (no server started).
         """
+        if not self._http_tools:
+            self._host = host
+            return host, 0
+
         if port == 0:
             port = _free_port()
 
@@ -95,27 +172,22 @@ class SandboxBridge:
 
         class _Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
-                # Route: /tool/<tool_name>
                 parts = self.path.strip("/").split("/")
                 if len(parts) != 2 or parts[0] != "tool":
                     self._respond(404, {"error": "Not found"})
                     return
-
                 tool_name = parts[1]
-                tool = bridge._tools.get(tool_name)
+                tool = bridge._http_tools.get(tool_name)
                 if tool is None:
                     self._respond(404, {"error": f"Unknown tool: {tool_name!r}"})
                     return
-
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length)
                 try:
                     kwargs: dict[str, Any] = json.loads(body) if body else {}
                 except json.JSONDecodeError as exc:
-                    self._respond(400, {"error": f"Bad JSON body: {exc}"})
+                    self._respond(400, {"error": f"Bad JSON: {exc}"})
                     return
-
-                # Dispatch the async tool from this sync thread.
                 fut: Future[Any] = asyncio.run_coroutine_threadsafe(
                     tool.execute(bridge._context, **kwargs),
                     bridge._loop,
@@ -135,7 +207,7 @@ class SandboxBridge:
                 self.wfile.write(body)
 
             def log_message(self, fmt: str, *args: Any) -> None:
-                pass  # suppress access logs
+                pass
 
         self._server = HTTPServer((host, port), _Handler)
         self._host = host
@@ -147,63 +219,80 @@ class SandboxBridge:
         return host, port
 
     def stop(self) -> None:
-        """Shut down the HTTP server.  Safe to call even if not started."""
+        """Shut down the HTTP server.  Safe to call if not started."""
         if self._server is not None:
             self._server.shutdown()
             self._server = None
 
-    # ── stub generation ────────────────────────────────────────────────────────
+    # ── code generation ────────────────────────────────────────────────────────
 
-    def stub_code(self, host: str, port: int) -> str:
-        """Return Python source code to inject into the sandbox.
+    def env_setup_code(self) -> str:
+        """Return Python source that sets env vars in the sandbox process.
 
-        The generated code defines one Python function per registered tool.
-        Each function serialises its keyword arguments as JSON, POSTs them to
-        the bridge, and returns the result string.
-
-        Parameters
-        ----------
-        host:
-            Hostname or IP reachable FROM the sandbox (e.g. an ngrok public
-            host, or "127.0.0.1" for local/test environments).
-        port:
-            Port the bridge is listening on (returned by ``start()``).
+        Inject this via ``sandbox.run_code(bridge.env_setup_code())`` BEFORE
+        ``stub_code()``, so the stubs can read the env vars on first call.
         """
-        lines: list[str] = [
-            "import json as _json, urllib.request as _req",
-            f"_BRIDGE_HOST = {host!r}",
-            f"_BRIDGE_PORT = {port!r}",
-            "",
-            "def _call_bridge(tool_name, **kwargs):",
-            "    url = f'http://{_BRIDGE_HOST}:{_BRIDGE_PORT}/tool/{tool_name}'",
-            "    data = _json.dumps(kwargs).encode()",
-            "    req = _req.Request(url, data=data,",
-            "                       headers={'Content-Type': 'application/json'})",
-            "    with _req.urlopen(req, timeout=60) as resp:",
-            "        payload = _json.loads(resp.read())",
-            "    if 'error' in payload:",
-            "        raise RuntimeError(f'Bridge error ({tool_name}): {payload[\"error\"]}')",
-            "    return payload['result']",
-            "",
-        ]
-        for name, tool in self._tools.items():
-            doc = (tool.description or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")[:200]
-            lines += [
-                f"def {name}(**kwargs):",
-                f'    """{doc}"""',
-                f"    return _call_bridge({name!r}, **kwargs)",
-                "",
-            ]
+        if not self._envs:
+            return ""
+        lines = ["import os as _os"]
+        for k, v in self._envs.items():
+            lines.append(f"_os.environ[{k!r}] = {v!r}")
         return "\n".join(lines)
 
-    def instructions_hint(self) -> str:
-        """One-line hint to add to agent instructions listing bridged tools.
+    def stub_code(self, host: str = "", port: int = 0) -> str:
+        """Return Python source that defines one callable per registered tool.
 
-        Example: "Inside execute_python you can call: search_web(query=…)"
+        Env-backend tools: stubs call cloud APIs directly (HTTPS, env var key).
+        HTTP-backend tools: stubs POST to the bridge server at host:port.
         """
-        names = ", ".join(f"{n}(…)" for n in self._tools)
+        parts: list[str] = []
+
+        # env-backend stubs (direct cloud API calls)
+        for name in self._env_tools:
+            stub_fn = _DIRECT_STUBS[name]
+            parts.append(stub_fn(self._envs))
+
+        # http-backend stubs
+        if self._http_tools:
+            http_header = [
+                "import json as _json, urllib.request as _req",
+                f"_BRIDGE_HOST = {host!r}",
+                f"_BRIDGE_PORT = {port!r}",
+                "",
+                "def _call_bridge(tool_name, **kwargs):",
+                "    url = f'http://{_BRIDGE_HOST}:{_BRIDGE_PORT}/tool/{tool_name}'",
+                "    data = _json.dumps(kwargs).encode()",
+                "    req = _req.Request(url, data=data,",
+                "                       headers={'Content-Type': 'application/json'})",
+                "    with _req.urlopen(req, timeout=60) as resp:",
+                "        payload = _json.loads(resp.read())",
+                "    if 'error' in payload:",
+                "        raise RuntimeError(",
+                "            f'Bridge error ({tool_name}): {payload[\"error\"]}')",
+                "    return payload['result']",
+                "",
+            ]
+            parts.append("\n".join(http_header))
+            for name, tool in self._http_tools.items():
+                doc = (tool.description or "").replace('"', '\\"').replace("\n", "\\n")[:200]
+                parts.append(
+                    f"def {name}(**kwargs):\n"
+                    f'    """{doc}"""\n'
+                    f"    return _call_bridge({name!r}, **kwargs)\n"
+                )
+
+        return "\n".join(parts)
+
+    def instructions_hint(self) -> str:
+        """One-line hint listing bridged tools for inclusion in agent instructions."""
+        names = ", ".join(f"{n}(…)" for n in self._all_tools)
+        backend_note = (
+            "via direct HTTPS" if not self._http_tools else
+            "via bridge" if not self._env_tools else
+            "via direct HTTPS or bridge"
+        )
         return (
             f"Inside execute_python the following host tools are available as "
-            f"Python functions: {names}. "
-            "Call them directly — they contact the host and return results."
+            f"Python functions ({backend_note}): {names}. "
+            "Call them directly — they return results as strings."
         )

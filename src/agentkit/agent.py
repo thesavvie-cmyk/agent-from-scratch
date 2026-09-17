@@ -80,6 +80,7 @@ class Agent:
         reflection: bool = False,
         code_execution: str | None = None,
         sandbox_tools: list[BaseTool] | None = None,
+        sandbox_envs: dict[str, str] | None = None,
         workspace: bool = False,
     ) -> None:
         self.model = model
@@ -97,6 +98,7 @@ class Agent:
         self._reflection = reflection
         self._code_execution = code_execution
         self._sandbox_tools: list[BaseTool] = list(sandbox_tools or [])
+        self._sandbox_envs: dict[str, str] = dict(sandbox_envs or {})
         self._workspace = workspace
 
         # Build effective instructions: base + planning primer + reflection
@@ -275,14 +277,19 @@ class Agent:
             from agentkit.tools.sandbox_bridge import SandboxBridge
 
             loop = asyncio.get_running_loop()
-            bridge = SandboxBridge(self._sandbox_tools, ctx, loop)
+            bridge = SandboxBridge(
+                self._sandbox_tools, ctx, loop, envs=self._sandbox_envs
+            )
             host, port = bridge.start()
             ctx.state["_bridge"] = bridge
+            env_code = bridge.env_setup_code()
+            if env_code:
+                await ctx.code_env.run_code(env_code)
             stubs = bridge.stub_code(host, port)
             await ctx.code_env.run_code(stubs)
             logger.debug(
-                "Bridge started at %s:%d; tools: %s",
-                host, port, list(bridge._tools),
+                "Bridge started at %s:%d; tools: %s (env keys: %s)",
+                host, port, list(bridge._all_tools), list(self._sandbox_envs),
             )
 
     async def _kill_sandbox(self, ctx: ExecutionContext) -> None:

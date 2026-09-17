@@ -36,6 +36,7 @@ if sys.platform == "win32":
 
 from agentkit.agent import Agent
 from agentkit.config import FAST_MODEL, find_uv
+from agentkit.gaia import load_search_tasks
 from agentkit.llm import LlmClient
 from agentkit.mcp_client import McpToolset
 from agentkit.reflection import REFLECTION_INSTRUCTIONS
@@ -50,16 +51,7 @@ MAX_STEPS = 8
 
 
 def _load_gaia(n: int) -> list[dict[str, Any]]:
-    data_file = Path(__file__).parent.parent / "data" / "gaia_validation.jsonl"
-    tasks: list[dict[str, Any]] = []
-    with data_file.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                tasks.append(json.loads(line))
-            if len(tasks) >= n:
-                break
-    return tasks
+    return list(load_search_tasks())[:n]
 
 
 # ── Answer normalisation ───────────────────────────────────────────────────────
