@@ -25,6 +25,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "tavily-python" },
     { name = "voyageai" },
 ]
@@ -56,6 +57,7 @@ requires-dist = [
     { name = "psutil" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "tavily-python" },
     { name = "voyageai" },
 ]

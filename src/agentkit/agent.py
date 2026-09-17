@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from agentkit.memory.budget import ContextBudget
     from agentkit.memory.longterm import LongTermMemory
     from agentkit.memory.session import Session, SessionStore
+    from agentkit.skills import SkillInfo
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,7 @@ class Agent:
         sandbox_tools: list[BaseTool] | None = None,
         sandbox_envs: dict[str, str] | None = None,
         workspace: bool = False,
+        skills_dir: Path | str | None = None,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -101,8 +104,15 @@ class Agent:
         self._sandbox_envs: dict[str, str] = dict(sandbox_envs or {})
         self._workspace = workspace
 
+        # Discover skills before building instructions so the skill list
+        # can be injected into the system prompt at construction time.
+        self._skills: list[SkillInfo] = []
+        if skills_dir is not None:
+            from agentkit.skills import discover_skills
+            self._skills = discover_skills(Path(skills_dir))
+
         # Build effective instructions: base + planning primer + reflection
-        # reminder (each enabled separately). Stored separately so
+        # reminder + skills list (each enabled separately). Stored separately so
         # self.instructions always reflects what the caller passed, while
         # _effective_instructions is what the LLM sees.
         parts = [instructions]
@@ -112,6 +122,9 @@ class Agent:
         if reflection:
             from agentkit.reflection import REFLECTION_INSTRUCTIONS
             parts.append(REFLECTION_INSTRUCTIONS)
+        if self._skills:
+            from agentkit.skills import format_skills_for_prompt
+            parts.append(format_skills_for_prompt(self._skills))
         self._effective_instructions = "\n\n".join(filter(None, parts))
 
         self._setup_tools(tools)
@@ -136,6 +149,10 @@ class Agent:
             from agentkit.tools.workspace_sandbox import WORKSPACE_TOOLS
             for wt in WORKSPACE_TOOLS:
                 self._toolbox[wt.name] = wt
+        if self._skills:
+            from agentkit.skills import make_read_skill_tool
+            rt = make_read_skill_tool(self._skills)
+            self._toolbox[rt.name] = rt
         self.output_tool_name: str | None = None
 
         if self.output_type is not None:
@@ -272,6 +289,15 @@ class Agent:
 
         ctx.code_env = await e2b.AsyncSandbox.create(timeout=E2B_TIMEOUT)
         logger.debug("e2b sandbox created: %s", ctx.code_env.sandbox_id)
+
+        # Upload skill scripts so execute_python / run_command can use them
+        if self._skills and self._workspace:
+            for skill in self._skills:
+                for script_path in skill.script_paths():
+                    remote = f"/home/user/skills/{skill.name}/{script_path.name}"
+                    content = script_path.read_text(encoding="utf-8")
+                    await ctx.code_env.files.write(remote, content)
+                    logger.debug("Uploaded skill script: %s → %s", script_path.name, remote)
 
         if self._sandbox_tools:
             from agentkit.tools.sandbox_bridge import SandboxBridge

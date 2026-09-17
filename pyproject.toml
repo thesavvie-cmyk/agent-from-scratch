@@ -17,6 +17,7 @@ dependencies = [
     "openpyxl",
     "chromadb>=1.5.9",
     "e2b-code-interpreter>=2.10.0",
+    "pyyaml",
 ]
 
 [project.scripts]
