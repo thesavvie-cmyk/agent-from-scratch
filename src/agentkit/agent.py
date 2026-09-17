@@ -77,6 +77,7 @@ class Agent:
         planning: bool = False,
         think_first: bool = False,
         reflection: bool = False,
+        code_execution: str | None = None,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -91,6 +92,7 @@ class Agent:
         self._planning = planning
         self._think_first = think_first
         self._reflection = reflection
+        self._code_execution = code_execution
 
         # Build effective instructions: base + planning primer + reflection
         # reminder (each enabled separately). Stored separately so
@@ -120,6 +122,9 @@ class Agent:
         if self._reflection:
             from agentkit.reflection import reflection as reflection_tool
             self._toolbox[reflection_tool.name] = reflection_tool
+        if self._code_execution:
+            from agentkit.tools.code_execution import execute_python
+            self._toolbox[execute_python.name] = execute_python
         self.output_tool_name: str | None = None
 
         if self.output_type is not None:
@@ -179,51 +184,61 @@ class Agent:
         if self._think_first:
             await self._think_step(ctx)
 
+        # Create sandbox before the main loop so it is available to tools
+        # from the first step.  Kill it in finally to guarantee cleanup on
+        # normal exit, max_steps, LLM error, or any unexpected exception.
+        if self._code_execution == "e2b":
+            await self._create_sandbox(ctx)
+
         final_result: str | BaseModel | None = None
         run_error: str | None = None
         try:
-            while final_result is None and ctx.current_step < self.max_steps:
-                final_result = await self._step(ctx)
-        except _LlmTransientError as exc:
-            run_error = str(exc)
+            try:
+                while final_result is None and ctx.current_step < self.max_steps:
+                    final_result = await self._step(ctx)
+            except _LlmTransientError as exc:
+                run_error = str(exc)
 
-        if run_error is not None:
-            ctx.final_result = ""
-            result = AgentResult(output="", error=run_error, context=ctx)
-        else:
-            output: str | BaseModel = (
-                final_result
-                if final_result is not None
-                else f"[max_steps={self.max_steps} reached without final answer]"
-            )
-            ctx.final_result = output
-            result = AgentResult(output=output, context=ctx)
+            if run_error is not None:
+                ctx.final_result = ""
+                result = AgentResult(output="", error=run_error, context=ctx)
+            else:
+                output: str | BaseModel = (
+                    final_result
+                    if final_result is not None
+                    else f"[max_steps={self.max_steps} reached without final answer]"
+                )
+                ctx.final_result = output
+                result = AgentResult(output=output, context=ctx)
 
-        # Save memories before returning so the extraction is never silently
-        # dropped.  In short-lived processes (agent ask, scripts) the event
-        # loop exits as soon as run() returns — a fire-and-forget create_task()
-        # would be garbage-collected or never scheduled.  Awaiting here adds
-        # one LLM call's latency but guarantees persistence.
-        if self._memory is not None and not result.error:
-            new_events = ctx.events[events_before:]
-            await self._save_memories(new_events)
+            # Save memories before returning so the extraction is never
+            # silently dropped.  In short-lived processes (agent ask,
+            # scripts) the event loop exits as soon as run() returns —
+            # a fire-and-forget create_task() would be garbage-collected or
+            # never scheduled.  Awaiting here adds one LLM call's latency
+            # but guarantees persistence.
+            if self._memory is not None and not result.error:
+                new_events = ctx.events[events_before:]
+                await self._save_memories(new_events)
 
-        # Persist new events and state to the session store
-        if session is not None and self._session_store is not None:
-            new_events = ctx.events[events_before:]
-            if new_events:
-                try:
-                    self._session_store.append_events(session.session_id, new_events)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to persist session events: %s", exc)
-            state_patch = dict(session.state)
-            if state_patch:
-                try:
-                    self._session_store.update_state(session.session_id, state_patch)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to persist session state: %s", exc)
+            # Persist new events and state to the session store
+            if session is not None and self._session_store is not None:
+                new_events = ctx.events[events_before:]
+                if new_events:
+                    try:
+                        self._session_store.append_events(session.session_id, new_events)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to persist session events: %s", exc)
+                state_patch = dict(session.state)
+                if state_patch:
+                    try:
+                        self._session_store.update_state(session.session_id, state_patch)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to persist session state: %s", exc)
 
-        return result
+            return result
+        finally:
+            await self._kill_sandbox(ctx)
 
     def _load_session_contents(self, session: Session) -> ExecutionContext:
         """Build an ExecutionContext pre-loaded with this session's event history."""
@@ -232,6 +247,27 @@ class Agent:
             ctx.add_event(evt)
         ctx.state.update(session.state)
         return ctx
+
+    async def _create_sandbox(self, ctx: ExecutionContext) -> None:
+        """Create an e2b AsyncSandbox and attach it to *ctx.code_env*."""
+        import e2b_code_interpreter as e2b
+
+        from agentkit.config import E2B_TIMEOUT
+
+        ctx.code_env = await e2b.AsyncSandbox.create(timeout=E2B_TIMEOUT)
+        logger.debug("e2b sandbox created: %s", ctx.code_env.sandbox_id)
+
+    async def _kill_sandbox(self, ctx: ExecutionContext) -> None:
+        """Kill the sandbox attached to *ctx*, if any. Errors are suppressed."""
+        if ctx.code_env is None:
+            return
+        try:
+            await ctx.code_env.kill()
+            logger.debug("e2b sandbox killed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to kill sandbox: %s", exc)
+        finally:
+            ctx.code_env = None
 
     # ── Loop internals ─────────────────────────────────────────────────────────
 

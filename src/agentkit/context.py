@@ -21,6 +21,13 @@ class ExecutionContext:
 
     The add_* helpers stamp execution_id automatically so callers never
     have to pass it explicitly.
+
+    code_env
+    --------
+    Holds a live sandbox when Agent is configured with code_execution="e2b".
+    Type is Any to avoid importing e2b_code_interpreter at module level
+    (the dependency is optional).  Tools that need it check for None and
+    raise a configuration error if it is absent.
     """
 
     execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -28,6 +35,7 @@ class ExecutionContext:
     current_step: int = 0
     state: dict[str, Any] = field(default_factory=dict)
     final_result: str | BaseModel | None = None
+    code_env: Any = None  # e2b_code_interpreter.AsyncSandbox | None
 
     # ── Core mutation ─────────────────────────────────────────────────────────
 
