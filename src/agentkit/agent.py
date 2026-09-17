@@ -1,6 +1,7 @@
 """Agent class — ReAct loop with structured output support (block 8)."""
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
@@ -78,6 +79,8 @@ class Agent:
         think_first: bool = False,
         reflection: bool = False,
         code_execution: str | None = None,
+        sandbox_tools: list[BaseTool] | None = None,
+        workspace: bool = False,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -93,6 +96,8 @@ class Agent:
         self._think_first = think_first
         self._reflection = reflection
         self._code_execution = code_execution
+        self._sandbox_tools: list[BaseTool] = list(sandbox_tools or [])
+        self._workspace = workspace
 
         # Build effective instructions: base + planning primer + reflection
         # reminder (each enabled separately). Stored separately so
@@ -125,6 +130,10 @@ class Agent:
         if self._code_execution:
             from agentkit.tools.code_execution import execute_python
             self._toolbox[execute_python.name] = execute_python
+        if self._workspace and self._code_execution:
+            from agentkit.tools.workspace_sandbox import WORKSPACE_TOOLS
+            for wt in WORKSPACE_TOOLS:
+                self._toolbox[wt.name] = wt
         self.output_tool_name: str | None = None
 
         if self.output_type is not None:
@@ -249,7 +258,12 @@ class Agent:
         return ctx
 
     async def _create_sandbox(self, ctx: ExecutionContext) -> None:
-        """Create an e2b AsyncSandbox and attach it to *ctx.code_env*."""
+        """Create an e2b AsyncSandbox, attach it to *ctx.code_env*.
+
+        If ``sandbox_tools`` were specified, also starts the HTTP bridge and
+        injects stub functions into the sandbox so Python code running there
+        can call host-side tools directly.
+        """
         import e2b_code_interpreter as e2b
 
         from agentkit.config import E2B_TIMEOUT
@@ -257,8 +271,26 @@ class Agent:
         ctx.code_env = await e2b.AsyncSandbox.create(timeout=E2B_TIMEOUT)
         logger.debug("e2b sandbox created: %s", ctx.code_env.sandbox_id)
 
+        if self._sandbox_tools:
+            from agentkit.tools.sandbox_bridge import SandboxBridge
+
+            loop = asyncio.get_running_loop()
+            bridge = SandboxBridge(self._sandbox_tools, ctx, loop)
+            host, port = bridge.start()
+            ctx.state["_bridge"] = bridge
+            stubs = bridge.stub_code(host, port)
+            await ctx.code_env.run_code(stubs)
+            logger.debug(
+                "Bridge started at %s:%d; tools: %s",
+                host, port, list(bridge._tools),
+            )
+
     async def _kill_sandbox(self, ctx: ExecutionContext) -> None:
-        """Kill the sandbox attached to *ctx*, if any. Errors are suppressed."""
+        """Kill the sandbox attached to *ctx* and stop the bridge, if any."""
+        bridge = ctx.state.pop("_bridge", None)
+        if bridge is not None:
+            bridge.stop()
+
         if ctx.code_env is None:
             return
         try:

@@ -20,3 +20,4 @@ Full GAIA results are in `results/` (gitignored).
 | 15    | Planning and think-first for agents | done | haiku+tools: 50% / 7 hit_max; haiku+tools+plan: 45% / 7 hit_max -- planning did not reduce looping |
 | 16    | Reflection and replan integration | done | full GAIA 20 tasks: HitMax 6→2 (refl), 6→2 (plan+refl); acc 50% all configs; DupCalls=0; reflection used as ERROR ANALYSIS + SELF CHECK before marking unsolvable |
 | 17    | Code execution via e2b sandbox | done | execute_python tool; sandbox lifecycle in Agent.run finally; sec(d): search-only=0/46 (hit max), search+code=46/46, code-only=43/46; sandbox creation ~600ms |
+| 18    | Tool bridge + workspace tools  | done | SandboxBridge (HTTP, stub injection); workspace: run_command, write/read/list_sandbox_file; Agent(sandbox_tools, workspace); ch08_workspace.py (a-d), ch08_gaia.py (4 configs) |
