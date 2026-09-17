@@ -280,7 +280,6 @@ async def run(limit: int | None) -> None:
 
         for config_name, planning, reflection in [
             ("haiku+tools",       False, False),
-            ("haiku+tools+plan",  True,  False),
             ("haiku+tools+refl",  False, True),
             ("haiku+plan+refl",   True,  True),
         ]:

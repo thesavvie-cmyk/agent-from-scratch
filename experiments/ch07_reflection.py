@@ -109,15 +109,17 @@ async def _run_broken_wiki(
         model=LlmClient(FAST_MODEL),
         tools=tools,
         instructions=(
-            "Always try get_wikipedia_page first for any factual question. "
-            "Only use other tools if Wikipedia is unavailable."
+            "STRICT TOOL POLICY: your FIRST tool call on every question "
+            "MUST be get_wikipedia_page. No exceptions. Only call other "
+            "tools after get_wikipedia_page has been attempted."
         ),
         max_steps=8,
         reflection=use_reflection,
     )
     t0 = time.perf_counter()
     result = await agent.run(
-        "What is the speed of light in a vacuum, in metres per second?"
+        "Use get_wikipedia_page to look up who won the 2025 Formula 1 "
+        "World Championship. Give the driver's name and their constructor."
     )
     elapsed = time.perf_counter() - t0
     u = result.context.state.get("token_usage", {})
