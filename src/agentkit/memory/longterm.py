@@ -91,7 +91,7 @@ def _make_chroma_embedding_fn(provider: Any) -> Any:
     provider_name = f"agentkit:{getattr(provider, 'name', 'unknown')}"
 
     class _Fn(EmbeddingFunction[Documents]):  # type: ignore[type-arg]
-        def __init__(self) -> None:  # noqa: D107
+        def __init__(self) -> None:
             # Do NOT call super().__init__() — it emits a DeprecationWarning
             # when no-args __init__ is not defined on the base class.
             self._p = provider
@@ -99,12 +99,12 @@ def _make_chroma_embedding_fn(provider: Any) -> Any:
         def name(self) -> str:  # type: ignore[override]
             return provider_name
 
-        def __call__(self, input: Documents) -> Embeddings:  # noqa: A002
+        def __call__(self, input: Documents) -> Embeddings:
             arr = self._p.embed(list(input))
             return arr.tolist()
 
         @classmethod
-        def build_from_config(cls, config: dict[str, Any]) -> "_Fn":  # type: ignore[override]
+        def build_from_config(cls, config: dict[str, Any]) -> _Fn:  # type: ignore[override]
             raise NotImplementedError("Cannot restore _ChromaEmbeddingFn from config")
 
         def get_config(self) -> dict[str, Any]:

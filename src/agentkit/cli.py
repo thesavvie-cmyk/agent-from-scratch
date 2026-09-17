@@ -237,7 +237,7 @@ def cmd_memory(args: argparse.Namespace) -> None:
         print(f"  {'Score':>6}  {'Updated':<20}  {'Text'}")
         print(f"  {'─'*6}  {'─'*20}  {'─'*50}")
         for m in results:
-            updated = datetime.datetime.fromtimestamp(m.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+            updated = datetime.datetime.fromtimestamp(m.updated_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
             print(f"  {m.score:>6.3f}  {updated:<20}  {m.text[:80]}")
         print()
         return
@@ -253,7 +253,7 @@ def cmd_memory(args: argparse.Namespace) -> None:
     print(f"  {'ID':<38}  {'Updated':<20}  {'Text'}")
     print(f"  {'─'*38}  {'─'*20}  {'─'*50}")
     for m in memories:
-        updated = datetime.datetime.fromtimestamp(m.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        updated = datetime.datetime.fromtimestamp(m.updated_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
         print(f"  {m.id:<38}  {updated:<20}  {m.text[:80]}")
     print()
 
@@ -290,8 +290,8 @@ def cmd_sessions(args: argparse.Namespace) -> None:
 
         print(f"\n  Session   : {session.session_id}")
         print(f"  User      : {session.user_id}")
-        created = datetime.datetime.fromtimestamp(session.created_at).strftime("%Y-%m-%d %H:%M:%S")
-        updated = datetime.datetime.fromtimestamp(session.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        created = datetime.datetime.fromtimestamp(session.created_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
+        updated = datetime.datetime.fromtimestamp(session.updated_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
         print(f"  Created   : {created}")
         print(f"  Updated   : {updated}")
         print(f"  Events    : {len(session.events)}")
@@ -327,7 +327,7 @@ def cmd_sessions(args: argparse.Namespace) -> None:
     print(f"\n  {'Session ID':<38} {'Events':>7} {'Updated':<20}")
     print(f"  {'─' * 38} {'─' * 7} {'─' * 20}")
     for s in sessions:
-        updated = datetime.datetime.fromtimestamp(s.updated_at).strftime("%Y-%m-%d %H:%M:%S")
+        updated = datetime.datetime.fromtimestamp(s.updated_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
         print(f"  {s.session_id:<38} {len(s.events):>7} {updated}")
     print()
 

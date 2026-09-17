@@ -54,6 +54,14 @@ def _annotation_to_json_schema(
         json_type = _TYPE_MAP.get(first_type, "string")
         return {"type": json_type, "enum": list(args)}
 
+    # list[T] → typed array (e.g. list[str] → {"type": "array", "items": {"type": "string"}})
+    if get_origin(annotation) is list:
+        args = get_args(annotation)
+        if args:
+            items = _annotation_to_json_schema(args[0], func_name, param_name)
+            return {"type": "array", "items": items}
+        return {"type": "array"}
+
     # Pydantic BaseModel subclass → inline its JSON schema
     if isinstance(annotation, type) and hasattr(annotation, "model_json_schema"):
         return annotation.model_json_schema()

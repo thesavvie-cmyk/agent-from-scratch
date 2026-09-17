@@ -74,6 +74,8 @@ class Agent:
         session_store: SessionStore | None = None,
         memory: LongTermMemory | None = None,
         user_id: str = "default",
+        planning: bool = False,
+        think_first: bool = False,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -85,13 +87,32 @@ class Agent:
         self._session_store = session_store
         self._memory = memory
         self._user_id = user_id
+        self._planning = planning
+        self._think_first = think_first
+
+        # Build effective instructions: base + planning primer (if enabled).
+        # Stored separately so self.instructions always reflects what the caller
+        # passed, while _effective_instructions is what the LLM sees.
+        if planning:
+            from agentkit.planning import PLANNING_INSTRUCTIONS
+            self._effective_instructions = "\n\n".join(
+                filter(None, [instructions, PLANNING_INSTRUCTIONS])
+            )
+        else:
+            self._effective_instructions = instructions
+
         self._setup_tools(tools)
 
     # ── Setup ─────────────────────────────────────────────────────────────────
 
     def _setup_tools(self, tools: list[BaseTool] | None) -> None:
-        """Build tool registry; add final_answer tool when output_type is set."""
+        """Build tool registry; add planning and final_answer tools when needed."""
         self._toolbox: dict[str, BaseTool] = {t.name: t for t in (tools or [])}
+
+        if self._planning:
+            from agentkit.planning import create_plan, get_plan, update_task
+            for pt in (create_plan, update_task, get_plan):
+                self._toolbox[pt.name] = pt
         self.output_tool_name: str | None = None
 
         if self.output_type is not None:
@@ -144,6 +165,12 @@ class Agent:
         events_before = len(ctx.events)
 
         ctx.add_message("user", user_input, author=self.name)
+
+        # Optional think-first step: one no-tools LLM call to analyse the task.
+        # The reasoning is stored as an Event so it informs every subsequent step.
+        # Does NOT increment current_step (does not count against max_steps).
+        if self._think_first:
+            await self._think_step(ctx)
 
         final_result: str | BaseModel | None = None
         run_error: str | None = None
@@ -272,6 +299,43 @@ class Agent:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Memory injection failed: %s", exc)
 
+    async def _think_step(self, context: ExecutionContext) -> None:
+        """Make one no-tools LLM call to analyse the task before acting.
+
+        The response is stored as a regular Event (visible in traces and used
+        as context by all subsequent steps).  step counter is NOT incremented.
+        Errors are logged but do not abort the run.
+        """
+        from agentkit.planning import THINK_INSTRUCTIONS
+
+        think_instructions = (
+            [self._effective_instructions, THINK_INSTRUCTIONS]
+            if self._effective_instructions
+            else [THINK_INSTRUCTIONS]
+        )
+        request = LlmRequest(
+            instructions=think_instructions,
+            contents=list(context.iter_content()),
+            tools=[],
+            tool_choice=None,
+        )
+        response = await self.think(request)
+        if response.error_message:
+            logger.warning("think_first step failed: %s", response.error_message)
+            return
+        # Accumulate token usage so reports include the think call
+        _usage = context.state.setdefault(
+            "token_usage", {"input_tokens": 0, "output_tokens": 0}
+        )
+        _usage["input_tokens"] += response.usage_metadata.get("input_tokens", 0)
+        _usage["output_tokens"] += response.usage_metadata.get("output_tokens", 0)
+        event = Event(
+            execution_id=context.execution_id,
+            author=self.name,
+            content=response.content,
+        )
+        context.add_event(event)
+
     async def _save_memories(self, events: list[Event]) -> None:
         """Extract facts from *events* and persist to long-term memory."""
         assert self._memory is not None
@@ -294,12 +358,22 @@ class Agent:
             logger.warning("Memory save failed: %s", exc)
 
     async def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
-        instructions = [self.instructions] if self.instructions else []
+        instructions = [self._effective_instructions] if self._effective_instructions else []
 
         # Append memory context block if injected (added once at run() start)
         memory_ctx = context.state.get("memory_context")
         if memory_ctx:
             instructions = list(instructions) + [memory_ctx]
+
+        # Append current plan status on every step (goal retention)
+        if self._planning:
+            plan_data = context.state.get("plan")
+            if plan_data:
+                from agentkit.planning import Plan
+                plan = Plan.model_validate(plan_data)
+                instructions = list(instructions) + [
+                    f"Current plan: {plan.progress()}"
+                ]
 
         contents = list(context.iter_content())
 

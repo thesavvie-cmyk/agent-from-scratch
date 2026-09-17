@@ -36,11 +36,9 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-from typing_extensions import Protocol
-
-from agentkit.types import ContentItem, Event
+from agentkit.types import Event
 
 logger = logging.getLogger(__name__)
 

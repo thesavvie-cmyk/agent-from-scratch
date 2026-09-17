@@ -72,8 +72,32 @@ def test_function_to_input_schema_union_pipe_syntax():
     assert "extra" not in schema["required"]
 
 
+def test_list_str_annotation_generates_typed_array():
+    """list[str] should generate {"type": "array", "items": {"type": "string"}}."""
+    def func_list(x: list[str]) -> str:
+        return ""
+
+    schema = function_to_input_schema(func_list)
+    assert schema["properties"]["x"]["type"] == "array"
+    assert schema["properties"]["x"]["items"]["type"] == "string"
+
+
+def test_list_int_annotation_generates_typed_array():
+    """list[int] should generate {"type": "array", "items": {"type": "integer"}}."""
+    def func_list(x: list[int]) -> str:
+        return ""
+
+    schema = function_to_input_schema(func_list)
+    assert schema["properties"]["x"]["type"] == "array"
+    assert schema["properties"]["x"]["items"]["type"] == "integer"
+
+
 def test_unknown_annotation_logs_warning(caplog):
-    def func_custom(x: list[int]) -> str:
+    """A truly unknown annotation (custom class) should warn and fall back to string."""
+    class _MyCustomClass:
+        pass
+
+    def func_custom(x: _MyCustomClass) -> str:
         return ""
 
     with caplog.at_level(logging.WARNING, logger="agentkit.schema"):
