@@ -97,6 +97,17 @@ class TruncateOldToolResults:
     ``[placeholder]``.  ToolCalls and Messages are never removed, so no
     orphans are ever produced.
 
+    **When to use**
+    Tool-heavy contexts where tool results dominate the token budget (the
+    section-A analysis from ch06 shows results at ~97% of context size for
+    search-heavy GAIA tasks).  Preserves the full conversation structure —
+    the model can still see what was asked and called, just not the bulky
+    payloads.
+
+    **When NOT to use**
+    Text-only chat sessions where there are no ToolResults to truncate.
+    This strategy is a no-op in that case — nothing will be saved.
+
     Parameters
     ----------
     keep_recent:
@@ -153,6 +164,43 @@ class DropOldest:
     before the cut already has its matching ToolResult.  This guarantees
     no orphaned ToolResults remain.
 
+    **When to use**
+    Sessions where messages themselves accumulate — either tool-rich
+    sessions where ``TruncateOldToolResults`` alone is insufficient, or
+    as a second-pass strategy in a ``ContextBudget`` chain.  Also suitable
+    when you genuinely do not need early conversation turns (e.g. task
+    delegation agents that move to new sub-goals).
+
+    **When NOT to use**
+    Text-only chat sessions where coherence depends on the full history.
+    Empirical result (ch06 section-D, 3 runs): in a 10-turn text-only
+    session at ~40 tok/turn, ``DropOldest(max_tokens=200)`` consistently
+    *increased* total context by +19–39% vs no compaction.  The model
+    compensates for missing context by generating longer, more explanatory
+    answers — exactly the opposite of the intended effect.
+    For text-only sessions use ``SummarizeHistory`` instead, which
+    preserves semantic continuity via a condensed summary message.
+
+    **Strategy selection guide** (based on context composition):
+
+    +-----------------------+-----------------------------+-------------------+
+    | Context composition   | Root cause                  | Right strategy    |
+    +=======================+=============================+===================+
+    | ~97% tool results     | Large search/file payloads  | TruncateOldTool   |
+    |                       | accumulate                  | Results           |
+    +-----------------------+-----------------------------+-------------------+
+    | ~100% messages, no    | Long multi-turn chat grows  | SummarizeHistory  |
+    | tool results          | indefinitely                |                   |
+    +-----------------------+-----------------------------+-------------------+
+    | Mixed: both messages  | Tool results + conversation | TruncateOldTool   |
+    | and tool results      | both contribute             | Results → then    |
+    |                       |                             | DropOldest as     |
+    |                       |                             | second pass       |
+    +-----------------------+-----------------------------+-------------------+
+
+    To diagnose composition, run ``estimate_context_tokens`` on each
+    category separately (see ch06 ``_analyse_trace_composition``).
+
     Parameters
     ----------
     max_tokens:
@@ -199,6 +247,25 @@ class SummarizeHistory:
 
     The summary call uses the cheap FAST_MODEL regardless of which model
     the agent itself uses, to keep compaction cost low.
+
+    **When to use**
+    Text-only or mixed chat sessions where semantic continuity matters.
+    Unlike ``DropOldest``, this preserves the *meaning* of early turns
+    rather than discarding them — the model knows what was discussed even
+    if it can no longer see the raw messages.  Particularly valuable for
+    long-running sessions (sessions never reset, so history grows
+    indefinitely across runs — compaction is eventually mandatory).
+
+    **When NOT to use**
+    Tool-heavy sessions where the old portion is mostly tool result
+    payloads.  Summarizing search results loses the exact data the model
+    needs to reason from; use ``TruncateOldToolResults`` first to evict
+    bulky payloads before summarizing the remaining conversation skeleton.
+
+    **Cost note**
+    Each compaction fires one extra FAST_MODEL LLM call.  For sessions
+    that trigger repeatedly, ``TruncateOldToolResults`` (zero extra cost)
+    is preferable as a first-pass strategy.
 
     Parameters
     ----------

@@ -8,6 +8,13 @@ SERVER_USER="${DEPLOY_USER:-agent}"
 SERVER_HOST="${DEPLOY_HOST:?Set DEPLOY_HOST to your server IP or hostname}"
 REMOTE_DIR="/home/${SERVER_USER}/agent-from-scratch"
 
+# ── Safety: never sync session databases ──────────────────────────────────────
+# Session databases (*.db, *.db-shm, *.db-wal) contain conversation history.
+# They are git-ignored and must never travel with deploys or backups.
+# If you add rsync to this script, always pass:  --exclude='*.db*'
+# Example:
+#   rsync -av --exclude='*.db*' --exclude='.env' src/ user@host:dst/
+
 # ── Pull latest code ──────────────────────────────────────────────────────────
 echo "==> Pulling latest code on ${SERVER_USER}@${SERVER_HOST}"
 ssh "${SERVER_USER}@${SERVER_HOST}" "
