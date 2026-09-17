@@ -76,6 +76,7 @@ class Agent:
         user_id: str = "default",
         planning: bool = False,
         think_first: bool = False,
+        reflection: bool = False,
     ) -> None:
         self.model = model
         self.instructions = instructions
@@ -89,17 +90,20 @@ class Agent:
         self._user_id = user_id
         self._planning = planning
         self._think_first = think_first
+        self._reflection = reflection
 
-        # Build effective instructions: base + planning primer (if enabled).
-        # Stored separately so self.instructions always reflects what the caller
-        # passed, while _effective_instructions is what the LLM sees.
+        # Build effective instructions: base + planning primer + reflection
+        # reminder (each enabled separately). Stored separately so
+        # self.instructions always reflects what the caller passed, while
+        # _effective_instructions is what the LLM sees.
+        parts = [instructions]
         if planning:
             from agentkit.planning import PLANNING_INSTRUCTIONS
-            self._effective_instructions = "\n\n".join(
-                filter(None, [instructions, PLANNING_INSTRUCTIONS])
-            )
-        else:
-            self._effective_instructions = instructions
+            parts.append(PLANNING_INSTRUCTIONS)
+        if reflection:
+            from agentkit.reflection import REFLECTION_INSTRUCTIONS
+            parts.append(REFLECTION_INSTRUCTIONS)
+        self._effective_instructions = "\n\n".join(filter(None, parts))
 
         self._setup_tools(tools)
 
@@ -113,6 +117,9 @@ class Agent:
             from agentkit.planning import create_plan, get_plan, update_task
             for pt in (create_plan, update_task, get_plan):
                 self._toolbox[pt.name] = pt
+        if self._reflection:
+            from agentkit.reflection import reflection as reflection_tool
+            self._toolbox[reflection_tool.name] = reflection_tool
         self.output_tool_name: str | None = None
 
         if self.output_type is not None:
@@ -364,6 +371,12 @@ class Agent:
         memory_ctx = context.state.get("memory_context")
         if memory_ctx:
             instructions = list(instructions) + [memory_ctx]
+
+        # If reflection flagged need_replan, inject a replan instruction once
+        # and consume the flag so it does not repeat on subsequent steps.
+        if self._reflection and context.state.pop("need_replan", False):
+            from agentkit.reflection import _REPLAN_INSTRUCTION
+            instructions = list(instructions) + [_REPLAN_INSTRUCTION]
 
         # Append current plan status on every step (goal retention)
         if self._planning:

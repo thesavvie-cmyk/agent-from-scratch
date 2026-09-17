@@ -150,6 +150,7 @@ async def _run_config(
     problems: list[dict[str, Any]],
     semaphore: asyncio.Semaphore,
     planning: bool = False,
+    reflection: bool = False,
 ) -> list[dict[str, Any]]:
     agent = Agent(
         model=LlmClient(FAST_MODEL),
@@ -159,6 +160,7 @@ async def _run_config(
         output_type=GaiaOutput,
         name=config_name,
         planning=planning,
+        reflection=reflection,
     )
     tasks = [
         _evaluate_task(p, agent, semaphore, config_name) for p in problems
@@ -197,16 +199,34 @@ def _cost(s: dict, model: str = FAST_MODEL) -> float:
     ) / 1_000_000
 
 
+def _count_dup_calls(traces_dir: Path, config_name: str) -> int:
+    """Count extra repeated tool calls (same name+args) across all task traces."""
+    total_extra = 0
+    for p in traces_dir.glob(f"*__{config_name}.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            seen: dict[str, int] = {}
+            for event in data.get("events", []):
+                for item in event.get("content", []):
+                    if item.get("type") == "tool_call":
+                        key = f"{item['name']}:{json.dumps(item.get('arguments', {}), sort_keys=True)}"
+                        seen[key] = seen.get(key, 0) + 1
+            total_extra += sum(v - 1 for v in seen.values() if v > 1)
+        except Exception:  # noqa: BLE001, S112
+            continue
+    return total_extra
+
+
 def _print_table(
     all_results: list[tuple[str, list[dict]]],
     hard_ids: set[str],
 ) -> None:
-    print(f"\n{'=' * 80}")
+    print(f"\n{'=' * 92}")
     print(
         f"  {'Config':<24} {'Acc':>6} {'Hard9-Acc':>10} {'Steps':>6} "
-        f"{'HitMax':>7} {'InTok':>8} {'Cost$':>7}"
+        f"{'HitMax':>7} {'InTok':>8} {'Cost$':>7} {'DupCalls':>9}"
     )
-    print("=" * 80)
+    print("=" * 92)
     for config_name, rows in all_results:
         s = _summarise(rows)
         if not s:
@@ -216,13 +236,14 @@ def _print_table(
 
         hard_acc = f"{hard_s['accuracy']:.0%} ({hard_s['correct']}/{hard_s['n']})" if hard_s else "  n/a"
         cost = _cost(s)
+        dup = _count_dup_calls(CH07_TRACES_DIR, config_name)
         print(
             f"  {config_name:<24} {s['accuracy']:>5.0%}  "
             f"{hard_acc:>10}  {s['avg_steps']:>6}  "
             f"{s['hit_max_steps']:>7}  {s['total_input_tokens']:>8}  "
-            f"${cost:>5.2f}"
+            f"${cost:>5.2f}  {dup:>9}"
         )
-    print("=" * 80)
+    print("=" * 92)
 
     if hard_ids:
         print("\n  Hard-9 task_ids (hit max_steps=8 in block 8):")
@@ -257,34 +278,41 @@ async def run(limit: int | None) -> None:
     async with McpToolset(*MCP_CMD) as ts:
         search_tools = load_mcp_tools(ts)
 
-        for config_name, planning in [
-            ("haiku+tools", False),
-            ("haiku+tools+plan", True),
+        for config_name, planning, reflection in [
+            ("haiku+tools",       False, False),
+            ("haiku+tools+plan",  True,  False),
+            ("haiku+tools+refl",  False, True),
+            ("haiku+plan+refl",   True,  True),
         ]:
             rows = await _run_config(
-                config_name, list(search_tools), problems, semaphore, planning=planning
+                config_name, list(search_tools), problems, semaphore,
+                planning=planning, reflection=reflection,
             )
             all_results.append((config_name, rows))
 
     _print_table(all_results, hard_ids)
 
-    # Per-task delta for hard tasks
-    if hard_ids and len(all_results) == 2:
+    # Per-task delta for hard tasks (baseline vs all other configs)
+    if hard_ids and all_results:
         baseline_map = {r["task_id"]: r for r in all_results[0][1]}
-        plan_map = {r["task_id"]: r for r in all_results[1][1]}
         hard_in_run = hard_ids & set(baseline_map)
         if hard_in_run:
-            print(f"\n  Per-task comparison on hard-9 tasks ({len(hard_in_run)} found in this run):")
-            print(f"  {'task_id':<36} {'base':>5} {'plan':>5} {'base_steps':>11} {'plan_steps':>11}")
+            config_names = [name for name, _ in all_results]
+            header = f"  {'task_id':<36}" + "".join(
+                f" {n:>18}" for n in config_names
+            )
+            print(f"\n  Per-task on hard-9 ({len(hard_in_run)} found in this run):")
+            print(header)
             for tid in sorted(hard_in_run):
-                b = baseline_map[tid]
-                p = plan_map.get(tid, {})
-                b_ok = "ok" if b["correct"] else "--"
-                p_ok = "ok" if p.get("correct") else "--"
-                print(
-                    f"  {tid:<36} {b_ok:>5} {p_ok:>5} "
-                    f"{b['steps']:>11} {p.get('steps', '?'):>11}"
-                )
+                row_str = f"  {tid:<36}"
+                for _, rows in all_results:
+                    r = next((x for x in rows if x["task_id"] == tid), None)
+                    if r:
+                        mark = "ok" if r["correct"] else "--"
+                        row_str += f" {mark:>4}/{r['steps']:>2}steps       "
+                    else:
+                        row_str += f"{'n/a':>18}"
+                print(row_str)
 
 
 def main() -> None:

@@ -18,3 +18,4 @@ Full GAIA results are in `results/` (gitignored).
 | 13    | Sessions and state persistence between runs | done | |
 | 14    | Long-term memory with ChromaDB | done | cross-session recall verified |
 | 15    | Planning and think-first for agents | done | haiku+tools: 50% / 7 hit_max; haiku+tools+plan: 45% / 7 hit_max -- planning did not reduce looping |
+| 16    | Reflection and replan integration | done | @tool reflection writes need_replan to state; Agent injects replan instruction on next step; smoke GAIA (3 tasks): refl=67%/0 hit_max vs baseline 0%/1 -- reflection looks promising |
