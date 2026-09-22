@@ -24,3 +24,17 @@ Full GAIA results are in `results/` (gitignored).
 | 19    | Agent skills                   | done | SkillInfo, parse_frontmatter (PyYAML), discover_skills, format_skills_for_prompt, make_read_skill_tool; Agent(skills_dir); 3 real skills (web-research, gaia-file-analysis, data-extraction) with scripts; L1=157tok vs 10 tools=1302tok; at 100 tools L1+read saves 79%; sec(d): agent never reads skills for trivial tasks |
 | ch8   | Full GAIA 20-task run (ch08_gaia.py) | done | baseline=60% HitMax=6, +refl=55% HitMax=8, +code=65% HitMax=5, +code+refl=not run (credits); all differences ≤2 tasks -- within noise at n=20; block-to-block comparison invalid (prompt changed); informative results came from point experiments with order-of-magnitude effects (46-city loop, 10-search batching), not from GAIA %diff |
 | 20    | Multi-agent workflows              | done | SequentialWorkflow, ParallelWorkflow (return_exceptions), LoopWorkflow (max_iterations); WorkflowStep(share_context); WorkflowResult.all_events deduplicates by id; agents/specialists.py: make_researcher/coder/writer/reviewer; 22 unit tests green (mocked, no API key); experiments ch09_workflow.py a-e ready (needs API key to run) |
+| 21    | Agent as Tool + Transfer           | done | AgentTool(BaseTool): child isolation, input_schema validation, child_traces in parent state, ChildAgentError→status=error, recursion+depth protection (_agent_call_stack propagated); TransferOrchestrator: shared context, transfer_to tool injected, ping-pong limit (max_transfers), transfer_log; 27 unit tests green (mocked); experiments ch09_orchestration.py a-e ready (needs API key) |
+
+## Ждёт прогона (нужен API-ключ Anthropic + Tavily)
+
+```
+# Блок 20 — workflow experiments
+uv run python experiments/ch09_workflow.py --section all
+
+# Блок 21 — orchestration experiments
+uv run python experiments/ch09_orchestration.py --section all
+
+# Live тесты блоков 20–21
+uv run pytest -m live tests/test_workflow.py tests/test_orchestration.py -v
+```
