@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from agentkit.context import ExecutionContext
 from agentkit.llm import LlmClient, LlmRequest, LlmResponse
 from agentkit.schema import build_tool_definition
+from agentkit.telemetry import add_span_event, get_tracer
 from agentkit.tools.base import BaseTool, FunctionTool
 from agentkit.types import Event, Message, ToolCall, ToolResult
 
@@ -220,53 +221,61 @@ class Agent:
 
         final_result: str | BaseModel | None = None
         run_error: str | None = None
-        try:
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("agent.run") as _run_span:
+            _run_span.set_attribute("agent.name", self.name)
+            _run_span.set_attribute("agent.max_steps", self.max_steps)
             try:
-                while final_result is None and ctx.current_step < self.max_steps:
-                    final_result = await self._step(ctx)
-            except _LlmTransientError as exc:
-                run_error = str(exc)
+                try:
+                    while final_result is None and ctx.current_step < self.max_steps:
+                        final_result = await self._step(ctx)
+                except _LlmTransientError as exc:
+                    run_error = str(exc)
 
-            if run_error is not None:
-                ctx.final_result = ""
-                result = AgentResult(output="", error=run_error, context=ctx)
-            else:
-                output: str | BaseModel = (
-                    final_result
-                    if final_result is not None
-                    else f"[max_steps={self.max_steps} reached without final answer]"
-                )
-                ctx.final_result = output
-                result = AgentResult(output=output, context=ctx)
+                if run_error is not None:
+                    ctx.final_result = ""
+                    result = AgentResult(output="", error=run_error, context=ctx)
+                else:
+                    output: str | BaseModel = (
+                        final_result
+                        if final_result is not None
+                        else f"[max_steps={self.max_steps} reached without final answer]"
+                    )
+                    ctx.final_result = output
+                    result = AgentResult(output=output, context=ctx)
 
-            # Save memories before returning so the extraction is never
-            # silently dropped.  In short-lived processes (agent ask,
-            # scripts) the event loop exits as soon as run() returns —
-            # a fire-and-forget create_task() would be garbage-collected or
-            # never scheduled.  Awaiting here adds one LLM call's latency
-            # but guarantees persistence.
-            if self._memory is not None and not result.error:
-                new_events = ctx.events[events_before:]
-                await self._save_memories(new_events)
+                _run_span.set_attribute("agent.steps_used", ctx.current_step)
+                if result.error:
+                    _run_span.set_attribute("agent.error", result.error)
 
-            # Persist new events and state to the session store
-            if session is not None and self._session_store is not None:
-                new_events = ctx.events[events_before:]
-                if new_events:
-                    try:
-                        self._session_store.append_events(session.session_id, new_events)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Failed to persist session events: %s", exc)
-                state_patch = dict(session.state)
-                if state_patch:
-                    try:
-                        self._session_store.update_state(session.session_id, state_patch)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Failed to persist session state: %s", exc)
+                # Save memories before returning so the extraction is never
+                # silently dropped.  In short-lived processes (agent ask,
+                # scripts) the event loop exits as soon as run() returns —
+                # a fire-and-forget create_task() would be garbage-collected or
+                # never scheduled.  Awaiting here adds one LLM call's latency
+                # but guarantees persistence.
+                if self._memory is not None and not result.error:
+                    new_events = ctx.events[events_before:]
+                    await self._save_memories(new_events)
 
-            return result
-        finally:
-            await self._kill_sandbox(ctx)
+                # Persist new events and state to the session store
+                if session is not None and self._session_store is not None:
+                    new_events = ctx.events[events_before:]
+                    if new_events:
+                        try:
+                            self._session_store.append_events(session.session_id, new_events)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to persist session events: %s", exc)
+                    state_patch = dict(session.state)
+                    if state_patch:
+                        try:
+                            self._session_store.update_state(session.session_id, state_patch)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to persist session state: %s", exc)
+
+                return result
+            finally:
+                await self._kill_sandbox(ctx)
 
     def _load_session_contents(self, session: Session) -> ExecutionContext:
         """Build an ExecutionContext pre-loaded with this session's event history."""
@@ -338,53 +347,58 @@ class Agent:
 
     async def _step(self, context: ExecutionContext) -> str | BaseModel | None:
         """One think→act cycle.  Returns the final result or None to continue."""
-        request = await self._prepare_llm_request(context)
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("agent.step") as _step_span:
+            _step_span.set_attribute("agent.name", self.name)
+            _step_span.set_attribute("agent.step_num", context.current_step)
 
-        if self._callbacks:
-            for cb in self._callbacks.before_model:
-                await self._invoke_callback(cb, context, request)
+            request = await self._prepare_llm_request(context)
 
-        response = await self.think(request)
+            if self._callbacks:
+                for cb in self._callbacks.before_model:
+                    await self._invoke_callback(cb, context, request)
 
-        if self._callbacks:
-            for cb in self._callbacks.after_model:
-                await self._invoke_callback(cb, context, response)
+            response = await self.think(request)
 
-        # Accumulate token usage in context state for downstream reporting
-        _usage = context.state.setdefault(
-            "token_usage", {"input_tokens": 0, "output_tokens": 0}
-        )
-        _usage["input_tokens"] += response.usage_metadata.get("input_tokens", 0)
-        _usage["output_tokens"] += response.usage_metadata.get("output_tokens", 0)
+            if self._callbacks:
+                for cb in self._callbacks.after_model:
+                    await self._invoke_callback(cb, context, response)
 
-        if response.error_message:
-            logger.warning(
-                "LLM transient error at step %d: %s",
-                context.current_step,
-                response.error_message,
+            # Accumulate token usage in context state for downstream reporting
+            _usage = context.state.setdefault(
+                "token_usage", {"input_tokens": 0, "output_tokens": 0}
             )
-            raise _LlmTransientError(response.error_message)
+            _usage["input_tokens"] += response.usage_metadata.get("input_tokens", 0)
+            _usage["output_tokens"] += response.usage_metadata.get("output_tokens", 0)
 
-        # Record think event (may contain Message + ToolCall items)
-        think_event = Event(
-            execution_id=context.execution_id,
-            author=self.name,
-            content=response.content,  # type: ignore[arg-type]
-        )
-        context.add_event(think_event)
+            if response.error_message:
+                logger.warning(
+                    "LLM transient error at step %d: %s",
+                    context.current_step,
+                    response.error_message,
+                )
+                raise _LlmTransientError(response.error_message)
 
-        if self._is_final_response(think_event):
+            # Record think event (may contain Message + ToolCall items)
+            think_event = Event(
+                execution_id=context.execution_id,
+                author=self.name,
+                content=response.content,  # type: ignore[arg-type]
+            )
+            context.add_event(think_event)
+
+            if self._is_final_response(think_event):
+                context.increment_step()
+                return self._extract_final_result(think_event)
+
+            # Execute tool calls; record results
+            tool_calls = [i for i in response.content if isinstance(i, ToolCall)]
+            if tool_calls:
+                results = await self.act(context, tool_calls)
+                context.add_tool_results(results, author=self.name)
+
             context.increment_step()
-            return self._extract_final_result(think_event)
-
-        # Execute tool calls; record results
-        tool_calls = [i for i in response.content if isinstance(i, ToolCall)]
-        if tool_calls:
-            results = await self.act(context, tool_calls)
-            context.add_tool_results(results, author=self.name)
-
-        context.increment_step()
-        return None
+            return None
 
     async def _inject_memories(self, context: ExecutionContext, query: str) -> None:
         """Search long-term memory and store results in context.state."""
@@ -503,6 +517,11 @@ class Agent:
                         "applied": report["applied"],
                     }
                 )
+                add_span_event("context.compacted", {
+                    "original_tokens": report["original_tokens"],
+                    "final_tokens": report["final_tokens"],
+                    "strategy": str(report["applied"]),
+                })
 
         if self.output_tool_name is not None:
             tool_choice: str | None = "required"
@@ -568,22 +587,28 @@ class Agent:
                 continue
 
             # ── execute ────────────────────────────────────────────────────────
-            try:
-                raw = await tool.execute(context, **args)
-                tool_result = ToolResult(
-                    tool_call_id=call.tool_call_id,
-                    name=call.name,
-                    status="success",
-                    content=[raw],
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Tool %r raised: %s", call.name, exc)
-                tool_result = ToolResult(
-                    tool_call_id=call.tool_call_id,
-                    name=call.name,
-                    status="error",
-                    content=[f"Error: {exc}"],
-                )
+            _tracer = get_tracer()
+            with _tracer.start_as_current_span("tool.execute") as _tspan:
+                _tspan.set_attribute("tool.name", call.name)
+                try:
+                    raw = await tool.execute(context, **args)
+                    _tspan.set_attribute("tool.status", "success")
+                    tool_result = ToolResult(
+                        tool_call_id=call.tool_call_id,
+                        name=call.name,
+                        status="success",
+                        content=[raw],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Tool %r raised: %s", call.name, exc)
+                    _tspan.set_attribute("tool.status", "error")
+                    _tspan.record_exception(exc)
+                    tool_result = ToolResult(
+                        tool_call_id=call.tool_call_id,
+                        name=call.name,
+                        status="error",
+                        content=[f"Error: {exc}"],
+                    )
 
             # ── after_tool callbacks ───────────────────────────────────────────
             if self._callbacks:

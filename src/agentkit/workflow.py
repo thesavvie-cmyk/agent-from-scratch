@@ -129,26 +129,31 @@ class SequentialWorkflow:
 
     async def run(self, user_input: str) -> WorkflowResult:
         """Execute all steps and return a WorkflowResult."""
+        from agentkit.telemetry import get_tracer
+
         step_results: list[AgentResult] = []
         current_input = user_input
         shared_ctx: ExecutionContext | None = None
 
-        for step in self.steps:
-            ctx = shared_ctx if step.share_context else None
-            result = await step.agent.run(current_input, context=ctx)
-            step_results.append(result)
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("workflow.sequential.run") as _span:
+            _span.set_attribute("workflow.num_steps", len(self.steps))
+            for step in self.steps:
+                ctx = shared_ctx if step.share_context else None
+                result = await step.agent.run(current_input, context=ctx)
+                step_results.append(result)
 
-            if step.share_context:
-                shared_ctx = result.context
+                if step.share_context:
+                    shared_ctx = result.context
 
-            if result.error:
-                return WorkflowResult(
-                    output=result.output,
-                    step_results=step_results,
-                    error=result.error,
-                )
+                if result.error:
+                    return WorkflowResult(
+                        output=result.output,
+                        step_results=step_results,
+                        error=result.error,
+                    )
 
-            current_input = str(result.output)
+                current_input = str(result.output)
 
         return WorkflowResult(
             output=step_results[-1].output,
@@ -192,8 +197,13 @@ class ParallelWorkflow:
 
     async def run(self, user_input: str) -> WorkflowResult:
         """Run all steps concurrently; merge results."""
-        tasks = [step.agent.run(user_input) for step in self.steps]
-        raw = await asyncio.gather(*tasks, return_exceptions=True)
+        from agentkit.telemetry import get_tracer
+
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("workflow.parallel.run") as _span:
+            _span.set_attribute("workflow.num_steps", len(self.steps))
+            tasks = [step.agent.run(user_input) for step in self.steps]
+            raw = await asyncio.gather(*tasks, return_exceptions=True)
 
         step_results: list[AgentResult] = []
         outputs: list[str] = []

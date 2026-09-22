@@ -44,6 +44,10 @@ eval = [
 local = [
     { name = "fastembed" },
 ]
+tracing = [
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-sdk" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -74,6 +78,10 @@ eval = [
     { name = "tqdm" },
 ]
 local = [{ name = "fastembed" }]
+tracing = [
+    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.20" },
+    { name = "opentelemetry-sdk", specifier = ">=1.20" },
+]
 
 [[package]]
 name = "aiohappyeyeballs"

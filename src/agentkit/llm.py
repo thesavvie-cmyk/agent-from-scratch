@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import litellm
 from pydantic import BaseModel, ConfigDict
 
+from agentkit.telemetry import CAPTURE_CONTENT, get_tracer, infer_llm_system
 from agentkit.tools.base import BaseTool
 from agentkit.transcript import items_to_messages
 from agentkit.types import ContentItem, Message, ToolCall
@@ -100,14 +101,32 @@ class LlmClient:
             if request.tool_choice is not None:
                 kwargs["tool_choice"] = request.tool_choice
 
-        try:
-            raw = await litellm.acompletion(**kwargs)
-            response = self._parse_response(raw)
-        except _CONFIG_ERRORS:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("LlmClient.generate error: %s", exc)
-            return LlmResponse(error_message=str(exc), usage_metadata={})
+        tracer = get_tracer()
+        with tracer.start_as_current_span("gen_ai.chat") as span:
+            span.set_attribute("gen_ai.system", infer_llm_system(self._model))
+            span.set_attribute("gen_ai.operation.name", "chat")
+            span.set_attribute("gen_ai.request.model", self._model)
+            if CAPTURE_CONTENT:
+                span.set_attribute("gen_ai.request.messages", str(messages)[:2000])
+
+            try:
+                raw = await litellm.acompletion(**kwargs)
+                response = self._parse_response(raw)
+            except _CONFIG_ERRORS:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                span.record_exception(exc)
+                logger.warning("LlmClient.generate error: %s", exc)
+                return LlmResponse(error_message=str(exc), usage_metadata={})
+
+            in_tok = response.usage_metadata.get("input_tokens", 0)
+            out_tok = response.usage_metadata.get("output_tokens", 0)
+            span.set_attribute("gen_ai.usage.input_tokens", in_tok)
+            span.set_attribute("gen_ai.usage.output_tokens", out_tok)
+            if CAPTURE_CONTENT and response.content:
+                texts = [i.content for i in response.content if isinstance(i, Message)]
+                if texts:
+                    span.set_attribute("gen_ai.completion", str(texts[0])[:1000])
 
         if self._budget_guard is not None:
             self._budget_guard.record(
