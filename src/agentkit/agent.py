@@ -213,18 +213,16 @@ class Agent:
         if self._think_first:
             await self._think_step(ctx)
 
-        # Create sandbox before the main loop so it is available to tools
-        # from the first step.  Kill it in finally to guarantee cleanup on
-        # normal exit, max_steps, LLM error, or any unexpected exception.
-        if self._code_execution == "e2b":
-            await self._create_sandbox(ctx)
-
         final_result: str | BaseModel | None = None
         run_error: str | None = None
         _tracer = get_tracer()
         with _tracer.start_as_current_span("agent.run") as _run_span:
             _run_span.set_attribute("agent.name", self.name)
             _run_span.set_attribute("agent.max_steps", self.max_steps)
+            # Create sandbox inside the span so sandbox.create is nested under
+            # agent.run.  Kill it in finally for guaranteed cleanup.
+            if self._code_execution == "e2b":
+                await self._create_sandbox(ctx)
             try:
                 try:
                     while final_result is None and ctx.current_step < self.max_steps:
@@ -296,7 +294,11 @@ class Agent:
 
         from agentkit.config import E2B_TIMEOUT
 
-        ctx.code_env = await e2b.AsyncSandbox.create(timeout=E2B_TIMEOUT)
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("sandbox.create") as _span:
+            _span.set_attribute("agent.name", self.name)
+            ctx.code_env = await e2b.AsyncSandbox.create(timeout=E2B_TIMEOUT)
+            _span.set_attribute("sandbox.id", ctx.code_env.sandbox_id)
         logger.debug("e2b sandbox created: %s", ctx.code_env.sandbox_id)
 
         # Upload skill scripts so execute_python / run_command can use them
@@ -335,13 +337,17 @@ class Agent:
 
         if ctx.code_env is None:
             return
-        try:
-            await ctx.code_env.kill()
-            logger.debug("e2b sandbox killed")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to kill sandbox: %s", exc)
-        finally:
-            ctx.code_env = None
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("sandbox.destroy") as _span:
+            _span.set_attribute("agent.name", self.name)
+            try:
+                await ctx.code_env.kill()
+                logger.debug("e2b sandbox killed")
+            except Exception as exc:  # noqa: BLE001
+                _span.record_exception(exc)
+                logger.warning("Failed to kill sandbox: %s", exc)
+            finally:
+                ctx.code_env = None
 
     # ── Loop internals ─────────────────────────────────────────────────────────
 

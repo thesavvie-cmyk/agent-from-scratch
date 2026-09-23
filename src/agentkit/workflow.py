@@ -273,29 +273,34 @@ class LoopWorkflow:
     async def run(self, user_input: str) -> WorkflowResult:
         """Execute the loop and return a WorkflowResult with one entry per
         iteration."""
+        from agentkit.telemetry import get_tracer
+
         step_results: list[AgentResult] = []
         current_input = user_input
         shared_ctx: ExecutionContext | None = None
 
-        for _i in range(self.max_iterations):
-            ctx = shared_ctx if self.step.share_context else None
-            result = await self.step.agent.run(current_input, context=ctx)
-            step_results.append(result)
+        _tracer = get_tracer()
+        with _tracer.start_as_current_span("workflow.loop.run") as _span:
+            _span.set_attribute("workflow.max_iterations", self.max_iterations)
+            for _i in range(self.max_iterations):
+                ctx = shared_ctx if self.step.share_context else None
+                result = await self.step.agent.run(current_input, context=ctx)
+                step_results.append(result)
 
-            if self.step.share_context:
-                shared_ctx = result.context
+                if self.step.share_context:
+                    shared_ctx = result.context
 
-            if result.error:
-                return WorkflowResult(
-                    output=result.output,
-                    step_results=step_results,
-                    error=result.error,
-                )
+                if result.error:
+                    return WorkflowResult(
+                        output=result.output,
+                        step_results=step_results,
+                        error=result.error,
+                    )
 
-            if not self.condition(result):
-                break
+                if not self.condition(result):
+                    break
 
-            current_input = str(result.output)
+                current_input = str(result.output)
 
         return WorkflowResult(
             output=step_results[-1].output,

@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any
 import litellm
 from pydantic import BaseModel, ConfigDict
 
-from agentkit.telemetry import CAPTURE_CONTENT, get_tracer, infer_llm_system
+import agentkit.telemetry as _tel
+from agentkit.telemetry import get_tracer, infer_llm_system
 from agentkit.tools.base import BaseTool
 from agentkit.transcript import items_to_messages
 from agentkit.types import ContentItem, Message, ToolCall
@@ -106,7 +107,7 @@ class LlmClient:
             span.set_attribute("gen_ai.system", infer_llm_system(self._model))
             span.set_attribute("gen_ai.operation.name", "chat")
             span.set_attribute("gen_ai.request.model", self._model)
-            if CAPTURE_CONTENT:
+            if _tel.CAPTURE_CONTENT:
                 span.set_attribute("gen_ai.request.messages", str(messages)[:2000])
 
             try:
@@ -123,7 +124,7 @@ class LlmClient:
             out_tok = response.usage_metadata.get("output_tokens", 0)
             span.set_attribute("gen_ai.usage.input_tokens", in_tok)
             span.set_attribute("gen_ai.usage.output_tokens", out_tok)
-            if CAPTURE_CONTENT and response.content:
+            if _tel.CAPTURE_CONTENT and response.content:
                 texts = [i.content for i in response.content if isinstance(i, Message)]
                 if texts:
                     span.set_attribute("gen_ai.completion", str(texts[0])[:1000])

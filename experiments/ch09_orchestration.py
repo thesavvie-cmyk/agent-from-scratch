@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import time
+from pathlib import Path
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
@@ -349,6 +351,12 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _main(args: argparse.Namespace) -> None:
+    if os.getenv("OTEL_EXPORTER") == "file":
+        from agentkit.telemetry import setup_tracing
+        _tf = f"results/traces/{Path(__file__).stem}.jsonl"
+        setup_tracing(service_name=Path(__file__).stem, exporter_type="file", filepath=_tf)
+        print(f"  Tracing → {_tf}\n")
+
     async with McpToolset(*MCP_CMD) as ts:
         search_tools = list(load_mcp_tools(ts))
 

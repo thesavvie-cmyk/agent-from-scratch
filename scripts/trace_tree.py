@@ -17,6 +17,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
 
 def _load(path: Path) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []

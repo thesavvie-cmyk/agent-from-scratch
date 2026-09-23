@@ -349,3 +349,78 @@ async def test_sequential_workflow_span(exporter: InMemorySpanExporter):
 
     # Both agent.run spans share the workflow's trace_id
     assert len(_trace_ids(exporter)) == 1
+
+
+# ── CAPTURE_CONTENT ────────────────────────────────────────────────────────────
+
+
+async def test_capture_content_false_no_text(exporter: InMemorySpanExporter):
+    """CRITICAL security test: when CAPTURE_CONTENT is False (default),
+    LLM prompt and completion text must NOT appear in span attributes."""
+    import agentkit.telemetry as tel
+
+    original = tel.CAPTURE_CONTENT
+    tel.CAPTURE_CONTENT = False
+    try:
+        import litellm
+
+        fake_usage = type("U", (), {"prompt_tokens": 10, "completion_tokens": 3})()
+        fake_choice = type("C", (), {"message": type("M", (), {
+            "content": "secret answer",
+            "tool_calls": None,
+        })()})()
+        fake_raw = type("R", (), {"choices": [fake_choice], "usage": fake_usage})()
+
+        with patch.object(litellm, "acompletion", AsyncMock(return_value=fake_raw)):
+            from agentkit.llm import LlmRequest
+
+            resp = await LlmClient("claude-haiku-4-5").generate(
+                LlmRequest(instructions=["sensitive system prompt"], contents=[])
+            )
+
+        assert resp.usage_metadata["input_tokens"] == 10
+        chat_span = _find(exporter, "gen_ai.chat")
+        assert chat_span is not None
+        # Prompt and completion text must NOT be stored
+        assert "gen_ai.request.messages" not in chat_span.attributes, (
+            "CAPTURE_CONTENT=False must not store prompt text in spans"
+        )
+        assert "gen_ai.completion" not in chat_span.attributes, (
+            "CAPTURE_CONTENT=False must not store completion text in spans"
+        )
+        # But model and token counts ARE stored
+        assert "gen_ai.request.model" in chat_span.attributes
+        assert "gen_ai.usage.input_tokens" in chat_span.attributes
+    finally:
+        tel.CAPTURE_CONTENT = original
+
+
+async def test_capture_content_true_stores_text(exporter: InMemorySpanExporter):
+    """When CAPTURE_CONTENT is True, LLM prompt text IS stored in spans."""
+    import agentkit.telemetry as tel
+
+    original = tel.CAPTURE_CONTENT
+    tel.CAPTURE_CONTENT = True
+    try:
+        import litellm
+
+        fake_usage = type("U", (), {"prompt_tokens": 10, "completion_tokens": 3})()
+        fake_choice = type("C", (), {"message": type("M", (), {
+            "content": "verbose answer",
+            "tool_calls": None,
+        })()})()
+        fake_raw = type("R", (), {"choices": [fake_choice], "usage": fake_usage})()
+
+        with patch.object(litellm, "acompletion", AsyncMock(return_value=fake_raw)):
+            from agentkit.llm import LlmRequest
+
+            await LlmClient("claude-haiku-4-5").generate(
+                LlmRequest(instructions=["system"], contents=[])
+            )
+
+        chat_span = _find(exporter, "gen_ai.chat")
+        assert chat_span is not None
+        assert "gen_ai.request.messages" in chat_span.attributes
+        assert "gen_ai.completion" in chat_span.attributes
+    finally:
+        tel.CAPTURE_CONTENT = original
