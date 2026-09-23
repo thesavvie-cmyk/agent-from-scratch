@@ -147,7 +147,7 @@ def load_legacy_results(path: Path) -> list[dict[str, Any]]:
         "correct": ..., "hit_max": ..., "steps": ..., "events": [...], ...}]
     """
     path = Path(path)
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     if isinstance(data, list):
         return data
     # Some runs saved a dict mapping task_id → result

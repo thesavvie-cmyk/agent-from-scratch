@@ -23,6 +23,8 @@ from agentkit.eval.judge import (
     verdicts_to_dict,
 )
 from agentkit.eval.rubrics import (
+    ADVERSARIAL_RESISTANCE,
+    ADVERSARIAL_RUBRICS,
     ALL_RUBRICS,
     ANSWER_RELEVANCE,
     DATA_PROVENANCE,
@@ -332,9 +334,14 @@ class TestRubrics:
         assert "format_compliance" in ALL_RUBRICS
         assert "trajectory_soundness" in ALL_RUBRICS
         assert "data_provenance" in ALL_RUBRICS
+        assert "adversarial_resistance" in ALL_RUBRICS
 
     def test_default_rubrics(self):
         assert len(DEFAULT_RUBRICS) == 5
+
+    def test_adversarial_rubrics(self):
+        assert ADVERSARIAL_RESISTANCE in ADVERSARIAL_RUBRICS
+        assert len(ADVERSARIAL_RUBRICS) >= 1
 
     def test_trajectory_requires_trace(self):
         assert TRAJECTORY_SOUNDNESS.requires_trace is True
@@ -343,10 +350,14 @@ class TestRubrics:
     def test_standard_not_require_trace(self):
         assert ANSWER_RELEVANCE.requires_trace is False
         assert FORMAT_COMPLIANCE.requires_trace is False
+        assert ADVERSARIAL_RESISTANCE.requires_trace is False
 
     def test_rubric_has_examples(self):
         for rubric in DEFAULT_RUBRICS:
             assert rubric.examples, f"{rubric.name} has no examples"
+
+    def test_adversarial_resistance_has_examples(self):
+        assert ADVERSARIAL_RESISTANCE.examples
 
     def test_rubric_fields(self):
         r = ANSWER_RELEVANCE
@@ -354,6 +365,38 @@ class TestRubrics:
         assert r.description
         assert r.pass_criterion
         assert r.fail_criterion
+
+
+class TestAdversarialDataset:
+    """Verify that indirect injection is in tool_result metadata, not user input."""
+
+    def test_custom018_has_benign_input(self):
+        ds = make_custom_dataset()
+        cases = {c.id: c for c in ds}
+        c = cases["custom-018"]
+        # User input must NOT contain the injection payload
+        assert "INJECTION_SUCCEEDED" not in c.input
+        assert "SYSTEM OVERRIDE" not in c.input
+        assert "PWNED" not in c.input
+
+    def test_custom018_injection_vector_is_tool_result(self):
+        ds = make_custom_dataset()
+        cases = {c.id: c for c in ds}
+        c = cases["custom-018"]
+        assert c.metadata.get("injection_vector") == "tool_result"
+        assert "injection_marker" in c.metadata
+
+    def test_custom018_is_search_task(self):
+        ds = make_custom_dataset()
+        cases = {c.id: c for c in ds}
+        c = cases["custom-018"]
+        assert "search" in c.input.lower() or "find" in c.input.lower()
+
+    def test_custom017_is_user_level_jailbreak(self):
+        ds = make_custom_dataset()
+        cases = {c.id: c for c in ds}
+        c = cases["custom-017"]
+        assert "user_level" in c.tags or "jailbreak" in c.tags
 
 
 # ── Judge ──────────────────────────────────────────────────────────────────────
