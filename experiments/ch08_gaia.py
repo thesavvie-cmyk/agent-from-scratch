@@ -40,6 +40,7 @@ from agentkit.gaia import load_search_tasks
 from agentkit.llm import LlmClient
 from agentkit.mcp_client import McpToolset
 from agentkit.reflection import REFLECTION_INSTRUCTIONS
+from agentkit.telemetry import setup_tracing
 from agentkit.tools.mcp import load_mcp_tools
 
 MCP_CMD = (find_uv(), ["run", "python", "-m", "agentkit.servers.tavily_server"])
@@ -52,6 +53,31 @@ MAX_STEPS = 8
 
 def _load_gaia(n: int) -> list[dict[str, Any]]:
     return list(load_search_tasks())[:n]
+
+
+# ── Task type classification ───────────────────────────────────────────────────
+
+_ARITHMETIC_HINTS = [
+    "how many", "how much", "how old", "how long", "how far",
+    "what year", "what number", "what count",
+    "total", "sum", "average", "percent", "ratio", "multiply", "divide",
+    "kilometer", "metre", "mile", "kilogram", "pound", "dollar", "euro",
+    "calculate", "compute", "convert",
+]
+_LIST_HINTS = [
+    "list", "name all", "which of", "rank", "smallest", "largest", "fewest",
+    "most", "albums", "movies", "books", "countries", "cities", "presidents",
+    "members", "players", "winners",
+]
+
+
+def _classify_task(task: dict[str, Any]) -> str:
+    q = task.get("Question", "").lower()
+    if any(h in q for h in _ARITHMETIC_HINTS):
+        return "arithmetic"
+    if any(h in q for h in _LIST_HINTS):
+        return "list"
+    return "research"
 
 
 # ── Answer normalisation ───────────────────────────────────────────────────────
@@ -108,14 +134,20 @@ async def _run_task(
     search_tools: list[Any],
     use_reflection: bool,
     use_code: bool,
+    task_type: str = "research",
 ) -> dict[str, Any]:
     instructions = "Answer questions precisely. Give only the final answer — no explanation."
     if use_reflection:
         instructions += f"\n\n{REFLECTION_INSTRUCTIONS}"
     if use_code:
         instructions += (
-            "\n\nUse execute_python for calculations, data processing, and tasks "
-            "requiring structured output or precise computation."
+            "\n\nYou have a Python sandbox (execute_python). Use it aggressively:\n"
+            "- ANY arithmetic, percentage, age, or unit conversion — never calculate mentally\n"
+            "- Collecting data for 3+ entities — use a loop, not separate searches\n"
+            "- Counting, ranking, or comparing items from a list\n"
+            "- Any task where the answer is a number derived from data\n"
+            "- Sorting, filtering, or aggregating search results\n"
+            "When in doubt: write code. Mental arithmetic is forbidden."
         )
 
     agent = Agent(
@@ -138,11 +170,16 @@ async def _run_task(
     dup_calls = _count_dup_calls(result.context.events)
     code_calls = _count_code_calls(result.context.events)
 
+    # Serialize events for downstream trajectory analysis (eval/traces.py).
+    # ToolResult.content is a list[Any] — keep as-is; Pydantic model_dump
+    # recurses into nested models automatically.
+    serialized_events = [ev.model_dump() for ev in result.context.events]
+
     return {
         "task_id": task.get("task_id", ""),
-        "question": task["Question"][:80],
+        "question": task["Question"],          # full question (was [:80])
         "gold": task.get("Final answer", ""),
-        "prediction": str(result.output)[:200],
+        "prediction": str(result.output),      # full output (was [:200])
         "correct": correct,
         "hit_max": hit_max,
         "steps": result.context.current_step,
@@ -150,6 +187,10 @@ async def _run_task(
         "code_calls": code_calls,
         "elapsed": elapsed,
         "error": result.error,
+        "task_type": task_type,
+        "events": serialized_events,
+        "input_tokens": getattr(result, "input_tokens", 0) or 0,
+        "output_tokens": getattr(result, "output_tokens", 0) or 0,
     }
 
 
@@ -166,7 +207,8 @@ async def _run_config(
     print(f"\n  Running [{label}] ({len(tasks)} tasks)...")
     results = []
     for i, task in enumerate(tasks):
-        r = await _run_task(task, search_tools, use_reflection, use_code)
+        ttype = _classify_task(task)
+        r = await _run_task(task, search_tools, use_reflection, use_code, task_type=ttype)
         tick = "✓" if r["correct"] else ("!" if r["hit_max"] else "✗")
         code_marker = f" code={r['code_calls']}" if r["code_calls"] else ""
         print(
@@ -183,6 +225,16 @@ def _summarise(label: str, results: list[dict[str, Any]]) -> dict[str, Any]:
     hit_max = sum(r["hit_max"] for r in results)
     dup_calls = sum(r["dup_calls"] for r in results)
     code_calls = sum(r["code_calls"] for r in results)
+
+    # Per-type accuracy
+    type_stats: dict[str, dict[str, int]] = {}
+    for r in results:
+        t = r.get("task_type", "research")
+        if t not in type_stats:
+            type_stats[t] = {"correct": 0, "n": 0}
+        type_stats[t]["n"] += 1
+        type_stats[t]["correct"] += int(r["correct"])
+
     return {
         "label": label,
         "n": n,
@@ -190,6 +242,7 @@ def _summarise(label: str, results: list[dict[str, Any]]) -> dict[str, Any]:
         "hit_max": hit_max,
         "dup_calls": dup_calls,
         "code_calls": code_calls,
+        "type_stats": type_stats,
     }
 
 
@@ -209,6 +262,13 @@ def _parse_args() -> argparse.Namespace:
 async def _main(args: argparse.Namespace) -> None:
     tasks = _load_gaia(args.tasks)
     print(f"\nLoaded {len(tasks)} GAIA tasks  model={FAST_MODEL}  max_steps={MAX_STEPS}")
+
+    # Enable OTel tracing — writes every span to a JSONL file.
+    # Required for trajectory analysis (eval/traces.py sections b/c).
+    RESULTS_DIR.mkdir(exist_ok=True)
+    span_file = RESULTS_DIR / f"ch08_gaia_spans_{args.config}.jsonl"
+    setup_tracing(exporter_type="file", filepath=str(span_file))
+    print(f"  Tracing → {span_file.name}")
 
     summaries: list[dict[str, Any]] = []
 
@@ -235,18 +295,30 @@ async def _main(args: argparse.Namespace) -> None:
             # Save per-config results
             RESULTS_DIR.mkdir(exist_ok=True)
             out_path = RESULTS_DIR / f"ch08_gaia_{label}.json"
-            out_path.write_text(json.dumps(results, indent=2, ensure_ascii=False))
+            out_path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"  Saved → {out_path}")
 
     # Summary table
-    print(f"\n  {'Config':<14} {'Acc':>6} {'HitMax':>7} {'CodeCalls':>10} {'DupCalls':>9}")
-    print(f"  {'-'*14} {'-'*6} {'-'*7} {'-'*10} {'-'*9}")
+    print(f"\n  {'Config':<14} {'Acc':>6} {'HitMax':>7} {'CodeCalls':>10} {'DupCalls':>9}"
+          f"  {'Arith%':>7}  {'List%':>6}  {'Res%':>5}")
+    print(f"  {'-'*14} {'-'*6} {'-'*7} {'-'*10} {'-'*9}  {'-'*7}  {'-'*6}  {'-'*5}")
     for s in summaries:
+        ts = s["type_stats"]
+
+        def _tacc(t: str, _ts: dict = ts) -> str:
+            d = _ts.get(t)
+            if not d or d["n"] == 0:
+                return "  n/a"
+            return f"{d['correct']}/{d['n']}={d['correct']/d['n']:.0%}"
+
         print(
             f"  {s['label']:<14} {s['accuracy']:>5.0%}   "
             f"{s['hit_max']:>5}/{s['n']}  "
             f"{s['code_calls']:>10}  "
-            f"{s['dup_calls']:>9}"
+            f"{s['dup_calls']:>9}  "
+            f"{_tacc('arithmetic'):>7}  "
+            f"{_tacc('list'):>6}  "
+            f"{_tacc('research'):>5}"
         )
 
     # Show tasks where code made a difference
