@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# Only run eval when agent code, prompts, or skills change.
+# README edits, pure doc changes don't need a model call.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint + Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python + uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Ruff lint
+        run: uv run ruff check src/ scripts/ experiments/
+
+      - name: Unit tests (no network)
+        run: uv run pytest -x -q --tb=short
+
+  eval-gate:
+    name: Eval Quality Gate
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    # Only run when agent code, prompts, or eval config changes.
+    # Avoids burning API credits on docs-only PRs.
+    if: |
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.changed_files, 'src/') ||
+      contains(toJson(github.event.pull_request.labels.*.name), 'run-eval')
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python + uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      # Detect which files changed and set a flag for eval
+      - name: Check if agent code changed
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            agent:
+              - 'src/**'
+              - 'skills/**'
+              - 'experiments/ch08_gaia.py'
+              - 'experiments/ch10_eval.py'
+              - 'scripts/eval_gate.py'
+              - 'pyproject.toml'
+
+      # Run agent on CI dataset (15 tasks, baseline config only — no E2B needed)
+      - name: Run agent on CI dataset
+        if: steps.changes.outputs.agent == 'true'
+        run: |
+          uv run --group eval python experiments/ch08_gaia.py \
+            --tasks 15 --config baseline
+        timeout-minutes: 15
+
+      # Judge results with LLM-as-judge (uses ANTHROPIC_API_KEY)
+      - name: Judge results
+        if: steps.changes.outputs.agent == 'true'
+        run: |
+          uv run --group eval python experiments/ch10_eval.py \
+            --section a \
+            --results results/ch08_gaia_baseline.json
+
+      # Run adversarial cases — any failure blocks the gate
+      - name: Run adversarial eval
+        if: steps.changes.outputs.agent == 'true'
+        run: |
+          uv run --group eval python experiments/ch10_eval.py \
+            --section d
+        continue-on-error: true   # result captured by gate, not this step
+
+      # Gate: compare to committed baseline, write PR summary
+      - name: Quality gate
+        if: steps.changes.outputs.agent == 'true'
+        run: |
+          uv run python scripts/eval_gate.py \
+            --report results/ch10_section_a_report.json \
+            --baseline results/eval_baseline.json \
+            --output results/eval_gate_result.json \
+            --github-summary
+        env:
+          GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
+
+      # Upload eval artifacts for inspection
+      - name: Upload eval results
+        if: always() && steps.changes.outputs.agent == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_number }}
+          path: |
+            results/ch10_section_a_report.json
+            results/ch10_section_d_report.json
+            results/eval_gate_result.json
+          retention-days: 14
