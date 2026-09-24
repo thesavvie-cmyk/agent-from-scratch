@@ -31,6 +31,9 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+a2a = [
+    { name = "aiohttp" },
+]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -67,6 +70,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+a2a = [{ name = "aiohttp", specifier = ">=3.9" }]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },

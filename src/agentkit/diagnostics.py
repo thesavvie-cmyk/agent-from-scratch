@@ -117,6 +117,19 @@ async def _check_mcp_cold_start() -> dict[str, Any]:
         }
 
 
+def _check_a2a() -> dict[str, Any]:
+    """Check that aiohttp (required for A2AServer) is importable."""
+    try:
+        import aiohttp
+        import aiohttp.web  # noqa: F401
+        return {"a2a_ok": True}
+    except ImportError:
+        return {
+            "a2a_ok": False,
+            "a2a_error": "aiohttp not installed — run: uv sync --group a2a",
+        }
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
@@ -127,6 +140,7 @@ async def run_doctor(json_output: bool = False) -> int:
     result["system"] = {**_check_platform(), **_check_memory(), **_check_disk()}
     result["node"] = _check_node()
     result["env_keys"] = _check_env_keys()
+    result["a2a"] = _check_a2a()
 
     print("Checking Anthropic API...", flush=True)
     result["anthropic"] = _check_anthropic_api()
@@ -180,4 +194,9 @@ def _print_human(r: dict[str, Any]) -> None:
     if not mcp.get("mcp_ok"):
         mcp_msg += f"  — {mcp.get('mcp_error', 'failed')}"
     print(f"  MCP server    : [{mcp_sym}] {mcp_msg}")
+
+    a2a = r.get("a2a", {})
+    a2a_sym = "✓" if a2a.get("a2a_ok") else "✗"
+    a2a_msg = "aiohttp ready" if a2a.get("a2a_ok") else a2a.get("a2a_error", "failed")
+    print(f"  A2A server    : [{a2a_sym}] {a2a_msg}")
     print()

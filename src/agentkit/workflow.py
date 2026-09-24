@@ -120,12 +120,18 @@ class SequentialWorkflow:
     ----------
     steps:
         Ordered list of WorkflowSteps.  Must be non-empty.
+    output_step:
+        Index into *steps* whose output becomes ``WorkflowResult.output``.
+        Defaults to ``None``, which returns the last step's output.
+        Use this when the last step is a gating/review step and the
+        valuable content comes from an earlier step.
     """
 
-    def __init__(self, steps: list[WorkflowStep]) -> None:
+    def __init__(self, steps: list[WorkflowStep], output_step: int | None = None) -> None:
         if not steps:
             raise ValueError("SequentialWorkflow requires at least one step")
         self.steps = steps
+        self.output_step = output_step
 
     async def run(self, user_input: str) -> WorkflowResult:
         """Execute all steps and return a WorkflowResult."""
@@ -155,8 +161,13 @@ class SequentialWorkflow:
 
                 current_input = str(result.output)
 
+        output = (
+            step_results[self.output_step].output
+            if self.output_step is not None
+            else step_results[-1].output
+        )
         return WorkflowResult(
-            output=step_results[-1].output,
+            output=output,
             step_results=step_results,
         )
 

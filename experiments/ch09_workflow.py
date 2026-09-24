@@ -126,7 +126,7 @@ async def section_b(model: LlmClient, search_tools: list) -> None:
         WorkflowStep(make_researcher(model, tools=search_tools)),
         WorkflowStep(make_writer(model)),
         WorkflowStep(make_reviewer(model)),
-    ])
+    ], output_step=1)  # return writer's article, not reviewer's stamp
 
     # Run monolith
     t0 = time.perf_counter()
@@ -331,21 +331,21 @@ async def _main(args: argparse.Namespace) -> None:
         setup_tracing(service_name=Path(__file__).stem, exporter_type="file", filepath=_tf)
         print(f"  Tracing → {_tf}\n")
 
+    model = LlmClient(FAST_MODEL)
+
     async with McpToolset(*MCP_CMD) as ts:
         search_tools = list(load_mcp_tools(ts))
 
-    model = LlmClient(FAST_MODEL)
-
-    if args.section in ("a", "all"):
-        await section_a(model, search_tools)
-    if args.section in ("b", "all"):
-        await section_b(model, search_tools)
-    if args.section in ("c", "all"):
-        await section_c(model, search_tools)
-    if args.section in ("d", "all"):
-        await section_d(model, search_tools)
-    if args.section in ("e", "all"):
-        await section_e(model)
+        if args.section in ("a", "all"):
+            await section_a(model, search_tools)
+        if args.section in ("b", "all"):
+            await section_b(model, search_tools)
+        if args.section in ("c", "all"):
+            await section_c(model, search_tools)
+        if args.section in ("d", "all"):
+            await section_d(model, search_tools)
+        if args.section in ("e", "all"):
+            await section_e(model)
 
 
 def main() -> None:
