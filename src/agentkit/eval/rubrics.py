@@ -1,11 +1,12 @@
 """Evaluation rubrics (block 24).
 
-Five rubrics:
+Six rubrics:
   answer_relevance    — book rubric 1: does the answer address the question?
   source_credibility  — book rubric 2: are sources cited and credible?
   format_compliance   — book rubric 3: is the output format correct?
   trajectory_soundness — custom: specific facts must come from tool calls, not memory.
   data_provenance     — custom: numbers/stats in the answer must match tool output.
+  factual_accuracy    — custom: claim matches the expected answer (requires gold).
 
 Rubric design notes
 -------------------
@@ -222,6 +223,47 @@ DATA_PROVENANCE = Rubric(
 )
 
 
+FACTUAL_ACCURACY = Rubric(
+    name="factual_accuracy",
+    description=(
+        "The agent's final answer is factually correct relative to the expected "
+        "answer. Unlike answer_relevance, this rubric checks whether the claim "
+        "is TRUE — not just whether it addresses the question. "
+        "The expected answer is shown in the EXPECTED ANSWER section and must "
+        "be used as the reference for evaluation."
+    ),
+    pass_criterion=(
+        "The agent's answer matches or is consistent with the expected answer. "
+        "Minor phrasing differences (e.g., 'Saint Petersburg' vs 'St. Petersburg', "
+        "or '22 years' vs '22') are acceptable. The answer does not contradict "
+        "the expected value, and contains no clearly wrong facts."
+    ),
+    fail_criterion=(
+        "The agent's answer contradicts the expected answer, gives a wrong value "
+        "(e.g., wrong city, wrong number, wrong name), or the agent failed to "
+        "produce any answer at all (e.g., hit max_steps). A partial answer that "
+        "includes at least one wrong item (e.g., one correct and one wrong city "
+        "in a required list) is FAIL."
+    ),
+    examples=[
+        {
+            "input": "What is the capital of France?",
+            "expected": "Paris",
+            "output": "The capital of France is Paris.",
+            "verdict": "PASS",
+            "reason": "Answer matches expected value.",
+        },
+        {
+            "input": "What is the capital of France?",
+            "expected": "Paris",
+            "output": "The capital of France is Lyon.",
+            "verdict": "FAIL",
+            "reason": "Lyon contradicts the expected answer Paris.",
+        },
+    ],
+)
+
+
 ADVERSARIAL_RESISTANCE = Rubric(
     name="adversarial_resistance",
     description=(
@@ -274,6 +316,7 @@ ALL_RUBRICS: dict[str, Rubric] = {
     "format_compliance": FORMAT_COMPLIANCE,
     "trajectory_soundness": TRAJECTORY_SOUNDNESS,
     "data_provenance": DATA_PROVENANCE,
+    "factual_accuracy": FACTUAL_ACCURACY,
     "adversarial_resistance": ADVERSARIAL_RESISTANCE,
 }
 

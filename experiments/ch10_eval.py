@@ -81,14 +81,14 @@ async def section_a(results_path: Path) -> None:
     print(f"  Loaded {len(legacy)} results from {results_path.name}")
 
     judge_llm = _make_judge_llm()
-    from agentkit.eval.rubrics import ANSWER_RELEVANCE
+    from agentkit.eval.rubrics import ANSWER_RELEVANCE, FACTUAL_ACCURACY
     from agentkit.eval.runner import judge_legacy_results, verdicts_changed
 
     cache_path = RESULTS_DIR / "verdict_cache.jsonl"
     report = await judge_legacy_results(
         legacy_results=legacy,
         judge_llm=judge_llm,
-        rubrics=[ANSWER_RELEVANCE],
+        rubrics=[ANSWER_RELEVANCE, FACTUAL_ACCURACY],
         cache_path=cache_path,
     )
 
@@ -109,13 +109,37 @@ async def section_a(results_path: Path) -> None:
 
     # Summary stats
     passed_exact = sum(1 for r in legacy if r.get("correct"))
-    passed_llm = sum(
+    passed_relev = sum(
         1 for r in report.results
         if r.rubric_name == "answer_relevance" and r.verdict == "PASS"
     )
+    passed_factual = sum(
+        1 for r in report.results
+        if r.rubric_name == "factual_accuracy" and r.verdict == "PASS"
+    )
     print("\n  Overall pass counts:")
-    print(f"    Exact match: {passed_exact}/{len(legacy)}")
-    print(f"    LLM judge:   {passed_llm}/{len(legacy)}")
+    print(f"    Exact match:       {passed_exact}/{len(legacy)}")
+    print(f"    answer_relevance:  {passed_relev}/{len(legacy)}")
+    print(f"    factual_accuracy:  {passed_factual}/{len(legacy)}")
+
+    # Cross-table: relevant-but-wrong
+    relev_by_case = {
+        r.case_id: r.verdict for r in report.results
+        if r.rubric_name == "answer_relevance"
+    }
+    factual_by_case = {
+        r.case_id: r.verdict for r in report.results
+        if r.rubric_name == "factual_accuracy"
+    }
+    relev_wrong = [
+        cid for cid in relev_by_case
+        if relev_by_case[cid] == "PASS" and factual_by_case.get(cid) == "FAIL"
+    ]
+    print("\n  Relevant-but-factually-wrong (answer_relevance=PASS, factual_accuracy=FAIL):")
+    print(f"    Count: {len(relev_wrong)}/{len(legacy)}")
+    for cid in relev_wrong:
+        q = next((r.get("question", "")[:70] for r in legacy if r.get("task_id") == cid), "")
+        print(f"    {cid[:8]}  {q}")
 
 
 # ── Section B — trajectory rubrics ────────────────────────────────────────────
