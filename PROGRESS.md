@@ -30,6 +30,8 @@ Full GAIA results are in `results/` (gitignored).
 | 25    | CI/CD with eval gate (chapter 10.4) — FINAL BLOCK | done | eval/gate.py: GateConfig (tolerance=0.10 — 1 task noise passes, 2+ task regression blocks on n=15), check_gate (must_pass_ids, per-rubric drop vs baseline, absolute thresholds); scripts/eval_gate.py: CLI for CI (exit 0/1, --update-baseline, --github-summary → $GITHUB_STEP_SUMMARY); .github/workflows/ci.yml: ruff+pytest on every PR, eval gate on src/** changes only (path filter saves credits), uploads artifacts; .github/workflows/deploy.yml: full eval → gate → SSH rsync deploy → agent doctor healthcheck → rollback on failure; scripts/collect_failures.py, promote_to_dataset.py; docs/quality_loop.md, docs/architecture.md; README.md updated; 19 gate unit tests including deliberate-degradation test (80%→0% blocked exit=1, same report exit=0 verified); 589 total tests green, ruff clean |
 | 24    | LLM-as-judge eval framework        | done | eval/dataset.py: EvalCase, EvalDataset (JSONL I/O, filter, split), gaia_to_eval_cases, make_custom_dataset (20 cases: 10 core/5 edge/4 adversarial+1 empty); eval/traces.py: TraceFeatures, extract_features, load/extract from legacy results and OTel JSONL; eval/rubrics.py: 6 rubrics (answer_relevance, source_credibility, format_compliance, trajectory_soundness, data_provenance, factual_accuracy) — last 3 require trace or gold; eval/judge.py: judge_single (reasoning-before-verdict), judge_pairwise (randomized order, first_shown recorded for positional-bias detection), VerdictCacheKey (SHA256[:16]); eval/runner.py: EvalRunner (async, per-rubric judge concurrency), VerdictCache (JSONL, persists across runs), EvalReport (JSON+markdown), _compute_metrics (overall/by-rubric/by-category pass rates), judge_legacy_results, verdicts_changed; scripts/open_coding.py, label.py, judge_agreement.py (Cohen's kappa); experiments/ch10_eval.py sections a-d; 73 unit tests green, ruff clean; sections a-c need saved results file, section d needs API key; manual labeling 20 GAIA cases (seed=42): κ=0.876 (almost perfect), 1 disagreement (7d4a7d1d: human labeling error corrected); exact_match=60% vs factual_accuracy=55% — 23dd907f is false PASS in exact_match (agent said 3, gold 2, "2" appeared in body text); 3 cases relevant-but-factually-wrong caught by factual_accuracy but not answer_relevance; ch08_gaia.py fixed: full prediction saved (was [:200]), events serialized (model_dump), OTel tracing by default, utf-8 encoding; indirect injection (custom-018) fixed: benign user input, malicious payload in tool result |
 
+| 26    | Plan critique + self-maintenance | done | planning_critic.py: run_critique_rounds (critic+revisor LLM calls, early exit on "no issues", JSON parse with fences+fallback); Agent(planning="critiqued", critique_rounds=N): hooks into act() after create_plan, _critique_plan updates ctx.state["plan"]; maintenance.py: _load_spans, _tool_error_counts, _hit_max_count, _synthesize_report (LLM markdown), _make_case_drafts (JSONL); experiments/ch11_critic.py: 3 configs × 3 runs × 20 tasks (custom+GAIA); scripts/maintenance_run.py; 25 unit tests green, ruff clean; RESULTS: custom acc=50%/60%/57% (±50%, шум); GAIA acc=70%/60%/60%, tokens=50K/88K/74K — критика не улучшила точность, но planning×1.75 токенов vs no_planning, critiqued_2 ×1.49; hit_max: planning=9/30 vs critiqued_2=4/30 (критика снизила looping); контекст критика чистый (только task+plan, история не протекает) |
+
 ## Ждёт прогона (нужен API-ключ Anthropic + Tavily)
 
 ```
@@ -44,4 +46,10 @@ uv run pytest -m live tests/test_workflow.py tests/test_orchestration.py -v
 
 # Блок 23 — live tracing (real agent + file exporter)
 uv run --group tracing python experiments/ch10_tracing.py --section live
+
+# Блок 26 — critic experiments (4 configs × 3 runs)
+uv run --group eval python experiments/ch11_critic.py --section all
+
+# Блок 26 — maintenance report
+uv run python scripts/maintenance_run.py
 ```

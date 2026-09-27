@@ -78,7 +78,8 @@ class Agent:
         session_store: SessionStore | None = None,
         memory: LongTermMemory | None = None,
         user_id: str = "default",
-        planning: bool = False,
+        planning: bool | str = False,
+        critique_rounds: int = 2,
         think_first: bool = False,
         reflection: bool = False,
         code_execution: str | None = None,
@@ -97,7 +98,8 @@ class Agent:
         self._session_store = session_store
         self._memory = memory
         self._user_id = user_id
-        self._planning = planning
+        self._planning = planning  # False | True | "critiqued"
+        self._critique_rounds = critique_rounds if planning == "critiqued" else 0
         self._think_first = think_first
         self._reflection = reflection
         self._code_execution = code_execution
@@ -120,6 +122,11 @@ class Agent:
         if planning:
             from agentkit.planning import PLANNING_INSTRUCTIONS
             parts.append(PLANNING_INSTRUCTIONS)
+            if planning == "critiqued":
+                parts.append(
+                    "Note: your initial plan will be reviewed and refined "
+                    "before you start working on it."
+                )
         if reflection:
             from agentkit.reflection import REFLECTION_INSTRUCTIONS
             parts.append(REFLECTION_INSTRUCTIONS)
@@ -616,6 +623,15 @@ class Agent:
                         content=[f"Error: {exc}"],
                     )
 
+            # ── critiqued planning: refine plan immediately after create_plan ──
+            if (
+                call.name == "create_plan"
+                and self._critique_rounds > 0
+                and tool_result.status == "success"
+            ):
+                task_text = self._extract_task_from_context(context)
+                await self._critique_plan(context, task_text)
+
             # ── after_tool callbacks ───────────────────────────────────────────
             if self._callbacks:
                 for cb in self._callbacks.after_tool:
@@ -636,6 +652,38 @@ class Agent:
         except Exception as exc:  # noqa: BLE001
             name = getattr(cb, "__name__", repr(cb))
             logger.warning("Callback %r raised: %s", name, exc)
+
+    def _extract_task_from_context(self, context: ExecutionContext) -> str:
+        """Return the first user message as the task description for the critic."""
+        for evt in context.events:
+            for item in evt.content:
+                if isinstance(item, Message) and item.role == "user":
+                    return item.content[:500]
+        return "Complete the task."
+
+    async def _critique_plan(self, context: ExecutionContext, task: str) -> None:
+        """Run critique_rounds of plan critique+revise; update context.state["plan"]."""
+        from agentkit.planning import Plan
+        from agentkit.planning_critic import run_critique_rounds
+
+        plan_data = context.state.get("plan")
+        if not plan_data:
+            return
+        plan = Plan.model_validate(plan_data)
+        logger.debug(
+            "Starting plan critique (%d round(s)) for task: %.80s",
+            self._critique_rounds, task
+        )
+        revised = await run_critique_rounds(
+            model=self.model,
+            task=task,
+            plan=plan,
+            rounds=self._critique_rounds,
+        )
+        context.state["plan"] = revised.model_dump()
+        # Log the revised plan as a state note (visible in traces)
+        context.state["plan_critique_applied"] = self._critique_rounds
+        logger.debug("Plan after critique: %s", revised.progress())
 
     def _is_final_response(self, event: Event) -> bool:
         """True when the think event signals a terminal response."""
